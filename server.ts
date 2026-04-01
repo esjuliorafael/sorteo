@@ -241,6 +241,14 @@ async function startServer() {
   const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "01234567890123456789012345678901"; // 32 bytes
   const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
+  if (!process.env.MP_ACCESS_TOKEN) {
+    console.warn(
+      '[MP] ADVERTENCIA: MP_ACCESS_TOKEN no está definido en .env. ' +
+      'El webhook de Mercado Pago no podrá consultar pagos y los boletos ' +
+      'NO se marcarán como pagados automáticamente.'
+    );
+  }
+
   // Encryption Helpers
   const encrypt = (text: string) => {
     const iv = crypto.randomBytes(16);
@@ -1002,7 +1010,11 @@ async function startServer() {
       }
 
       // FIX 1: Obtener el pago usando credenciales de la plataforma para resolver el seller
-      const platformToken = process.env.MP_ACCESS_TOKEN || MP_CLIENT_SECRET;
+      const platformToken = process.env.MP_ACCESS_TOKEN;
+      if (!platformToken) {
+        console.error('[MP Webhook] MP_ACCESS_TOKEN no está configurado. Imposible consultar pagos.');
+        return res.sendStatus(200);
+      }
       const initialResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
         headers: { "Authorization": `Bearer ${platformToken}` }
       });
