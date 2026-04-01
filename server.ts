@@ -604,7 +604,7 @@ async function startServer() {
         COUNT(t.id) as sold_count
       FROM raffles r
       LEFT JOIN tickets t ON r.id = t.raffle_id AND t.status IN ('paid', 'reserved', 'processing')
-      WHERE r.user_id = ? AND r.status = 'active' AND r.draw_date >= date('now')
+      WHERE r.user_id = ? AND r.status = 'active' AND r.draw_date BETWEEN date('now') AND date('now', '+30 days')
       GROUP BY r.id
       ORDER BY r.draw_date ASC
       LIMIT 5

@@ -139,7 +139,9 @@ export default function App() {
         setSelectedRaffleId(null);
       }}
     >
-      {activeTab === "dashboard" && <Dashboard />}
+      <div className={activeTab === "dashboard" ? "block" : "hidden"}>
+        <Dashboard isActive={activeTab === "dashboard"} />
+      </div>
       {activeTab === "raffles" && (
         selectedRaffleId ? (
           <RaffleDetail 

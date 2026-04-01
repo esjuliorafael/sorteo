@@ -59,7 +59,11 @@ interface UpcomingRaffle {
   sold_count: number;
 }
 
-export default function Dashboard() {
+interface DashboardProps {
+  isActive: boolean;
+}
+
+export default function Dashboard({ isActive }: DashboardProps) {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [salesByRaffle, setSalesByRaffle] = useState<SalesByRaffle[]>([]);
   const [revenueTimeline, setRevenueTimeline] = useState<RevenueTimeline[]>([]);
@@ -89,8 +93,11 @@ export default function Dashboard() {
       }
     };
 
-    fetchData();
-  }, []);
+    // Option A: Refetch when isActive becomes true
+    if (isActive) {
+      fetchData();
+    }
+  }, [isActive]);
 
   if (loading || !stats) {
     return (
