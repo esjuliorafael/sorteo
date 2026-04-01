@@ -36,7 +36,7 @@ export default function Layout({ children, user, onLogout, activeTab, setActiveT
       {/* Sidebar - Desktop */}
       <aside className="hidden md:flex flex-col w-64 bg-white border-r border-gray-200 h-screen sticky top-0">
         <div className="p-6 border-b border-gray-100">
-          <h1 className="text-2xl font-bold tracking-tighter text-black">KOUUN</h1>
+          <h1 className="text-2xl font-bold tracking-tighter text-black">Sorteo</h1> {/* renamed: KOUUN → Sorteo */}
           <p className="text-[10px] uppercase tracking-widest text-gray-400 font-medium mt-1">Rifas Digitales</p>
         </div>
         
@@ -80,7 +80,7 @@ export default function Layout({ children, user, onLogout, activeTab, setActiveT
 
       {/* Header - Mobile */}
       <header className="md:hidden bg-white border-b border-gray-200 p-4 sticky top-0 z-50 flex items-center justify-between">
-        <h1 className="text-xl font-bold tracking-tighter text-black">KOUUN</h1>
+        <h1 className="text-xl font-bold tracking-tighter text-black">Sorteo</h1> {/* renamed: KOUUN → Sorteo */}
         <button onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} className="p-2">
           {isMobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
         </button>

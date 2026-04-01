@@ -22,7 +22,7 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
   const steps = [
     {
       title: "Gestión Caótica",
-      description: "Olvídate de las hojas de cálculo y los grupos de WhatsApp. Kouun centraliza todo en un solo lugar.",
+      description: "Olvídate de las hojas de cálculo y los grupos de WhatsApp. Sorteo centraliza todo en un solo lugar.", // renamed: KOUUN → Sorteo
       icon: X,
       color: "bg-red-50 text-red-500",
       illustration: (

@@ -13,24 +13,33 @@ import {
   MessageCircle,
   Search
 } from "lucide-react";
-import { Raffle, Ticket } from "@/src/types";
+import { Raffle, Ticket, User } from "@/src/types";
 import { api } from "@/src/services/api";
 import { cn } from "@/src/lib/utils";
 import { format } from "date-fns";
 import { es } from "date-fns/locale";
+import { buildWhatsAppUrl } from "@/src/lib/whatsapp";
+import { toPng } from "html-to-image";
+import TicketCard from "./TicketCard";
+import { useRef } from "react";
 
 interface RaffleDetailProps {
   raffleId: number;
+  user: User | null;
   onBack: () => void;
 }
 
-export default function RaffleDetail({ raffleId, onBack }: RaffleDetailProps) {
+export default function RaffleDetail({ raffleId, user, onBack }: RaffleDetailProps) {
   const [raffle, setRaffle] = useState<Raffle | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [ticketToDownload, setTicketToDownload] = useState<Ticket | null>(null);
   const [searchTicket, setSearchTicket] = useState("");
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [isReserveModalOpen, setIsReserveModalOpen] = useState(false);
   const [reserveForm, setReserveForm] = useState({ name: "", whatsapp: "" });
+  
+  const ticketRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetchRaffle();
@@ -46,15 +55,55 @@ export default function RaffleDetail({ raffleId, onBack }: RaffleDetailProps) {
     }
   };
 
+  const downloadTicket = async (ticket: Ticket) => {
+    if (!raffle) return;
+    
+    setIsDownloading(true);
+    setTicketToDownload(ticket);
+    
+    // Wait for the TicketCard to render in the hidden div
+    setTimeout(async () => {
+      if (ticketRef.current) {
+        try {
+          const dataUrl = await toPng(ticketRef.current, { 
+            pixelRatio: 2,
+            quality: 1,
+            backgroundColor: "#ffffff"
+          });
+          
+          const link = document.createElement("a");
+          link.download = `ticket-${ticket.number}-${ticket.participant_name?.replace(/\s+/g, "-").toLowerCase()}.png`;
+          link.href = dataUrl;
+          link.click();
+        } catch (err) {
+          console.error("Error generating ticket image:", err);
+          alert("Error al generar el ticket digital");
+        } finally {
+          setIsDownloading(false);
+          setTicketToDownload(null);
+        }
+      }
+    }, 500); // Small delay to ensure rendering
+  };
+
   const handleReserve = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedTicket) return;
     try {
-      await api.post(`/tickets/${selectedTicket.id}/reserve`, reserveForm);
+      const response = await api.post(`/tickets/${selectedTicket.id}/reserve`, reserveForm);
       setIsReserveModalOpen(false);
       setReserveForm({ name: "", whatsapp: "" });
       setSelectedTicket(null);
-      fetchRaffle();
+      
+      // Fetch updated raffle to get the reserved ticket data
+      const updatedRaffle = await api.get(`/raffles/${raffleId}`);
+      setRaffle(updatedRaffle);
+      
+      // Find the newly reserved ticket and download it
+      const reservedTicket = updatedRaffle.tickets?.find((t: Ticket) => t.id === selectedTicket.id);
+      if (reservedTicket) {
+        downloadTicket(reservedTicket);
+      }
     } catch (err) {
       alert("Error al apartar boleto");
     }
@@ -253,11 +302,29 @@ export default function RaffleDetail({ raffleId, onBack }: RaffleDetailProps) {
                             <CheckCircle2 size={16} />
                           </button>
                         )}
-                        <button 
-                          className="p-2 bg-blue-50 text-blue-600 rounded-xl hover:bg-blue-100 transition-colors"
+                        <a 
+                          href={ticket.participant_whatsapp ? buildWhatsAppUrl(ticket, raffle, user) : "#"}
+                          target={ticket.participant_whatsapp ? "_blank" : undefined}
+                          rel={ticket.participant_whatsapp ? "noopener noreferrer" : undefined}
+                          className={cn(
+                            "p-2 bg-blue-50 text-blue-600 rounded-xl hover:bg-blue-100 transition-colors",
+                            !ticket.participant_whatsapp && "opacity-40 cursor-not-allowed"
+                          )}
                           title="Enviar WhatsApp"
                         >
                           <MessageCircle size={16} />
+                        </a>
+                        <button 
+                          onClick={() => downloadTicket(ticket)}
+                          disabled={isDownloading}
+                          className="p-2 bg-gray-50 text-gray-600 rounded-xl hover:bg-gray-100 transition-colors disabled:opacity-50"
+                          title="Descargar Ticket"
+                        >
+                          {isDownloading && ticketToDownload?.id === ticket.id ? (
+                            <div className="w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <Download size={16} />
+                          )}
                         </button>
                         <button 
                           onClick={() => handleDeleteReservation(ticket.id)}
@@ -279,6 +346,22 @@ export default function RaffleDetail({ raffleId, onBack }: RaffleDetailProps) {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Hidden Ticket for Capture */}
+      <div 
+        className="fixed left-[-9999px] top-[-9999px] pointer-events-none opacity-0"
+        aria-hidden="true"
+      >
+        {ticketToDownload && raffle && (
+          <div ref={ticketRef}>
+            <TicketCard 
+              ticket={ticketToDownload} 
+              raffle={raffle} 
+              user={user}
+            />
+          </div>
+        )}
       </div>
 
       {/* Reserve Modal */}

@@ -64,7 +64,7 @@ export default function Subscription({ user }: SubscriptionProps) {
       <header className="text-center max-w-2xl mx-auto">
         <h2 className="text-4xl font-black tracking-tighter text-black mb-4">Planes y Suscripción</h2>
         <p className="text-gray-500 text-lg font-medium">
-          Elige el plan que mejor se adapte a tus necesidades. Escala tu negocio con Sorteo.{/* renamed: Kouun → Sorteo */}
+          Elige el plan que mejor se adapte a tus necesidades. Escala tu negocio con Sorteo. {/* renamed: KOUUN → Sorteo */}
         </p>
       </header>
 
@@ -124,7 +124,7 @@ export default function Subscription({ user }: SubscriptionProps) {
           <div className="flex flex-col sm:flex-row gap-4">
             <input 
               type="text" 
-              placeholder="SORTEO-2026"{/* renamed: KOUUN-2026 → SORTEO-2026 */}
+              placeholder="Sorteo-2026" // renamed: KOUUN → Sorteo
               className="flex-1 px-6 py-4 bg-gray-50 border-none rounded-2xl focus:ring-2 focus:ring-black/5 transition-all font-mono font-bold"
             />
             <button className="px-8 py-4 bg-black text-white rounded-2xl font-bold hover:bg-gray-800 transition-all">

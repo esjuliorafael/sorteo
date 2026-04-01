@@ -7,6 +7,9 @@ import RaffleDetail from "./components/RaffleDetail";
 import CreateRaffle from "./components/CreateRaffle";
 import Onboarding from "./components/Onboarding";
 import Subscription from "./components/Subscription";
+import Settings from "./components/Settings";
+import PublicProfile from "./pages/PublicProfile";
+import PublicRaffle from "./pages/PublicRaffle";
 import { User } from "./types";
 import { api } from "./services/api";
 
@@ -18,13 +21,29 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Public Routing Logic
+  const pathname = window.location.pathname;
+  const pathParts = pathname.split("/").filter(Boolean);
+  const isPublicRoute = pathParts.length > 0 && !["dashboard", "raffles", "create", "subscription", "settings", "auth"].includes(pathParts[0]);
+
   useEffect(() => {
-    if (token) {
+    if (token && !isPublicRoute) {
       fetchProfile();
     } else {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, isPublicRoute]);
+
+  useEffect(() => {
+    const handleAuthFailed = () => {
+      localStorage.removeItem("token");
+      localStorage.removeItem("refresh_token");
+      setToken(null);
+      setUser(null);
+    };
+    window.addEventListener("auth_failed", handleAuthFailed);
+    return () => window.removeEventListener("auth_failed", handleAuthFailed);
+  }, []);
 
   const fetchProfile = async () => {
     try {
@@ -43,8 +62,9 @@ export default function App() {
     }
   };
 
-  const handleAuthSuccess = (newToken: string, userData: User) => {
+  const handleAuthSuccess = (newToken: string, newRefreshToken: string, userData: User) => {
     localStorage.setItem("token", newToken);
+    localStorage.setItem("refresh_token", newRefreshToken);
     setToken(newToken);
     setUser(userData);
     
@@ -54,8 +74,17 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    const refreshToken = localStorage.getItem("refresh_token");
+    if (refreshToken) {
+      try {
+        await api.post("/auth/logout", { refreshToken });
+      } catch (e) {
+        console.error("Logout error:", e);
+      }
+    }
     localStorage.removeItem("token");
+    localStorage.removeItem("refresh_token");
     setToken(null);
     setUser(null);
     setActiveTab("dashboard");
@@ -73,13 +102,23 @@ export default function App() {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center">
         <div className="flex flex-col items-center space-y-4">
-          <h1 className="text-4xl font-black tracking-tighter text-white animate-pulse">Sorteo</h1>{/* renamed: KOUUN → Sorteo */}
+          <h1 className="text-4xl font-black tracking-tighter text-white animate-pulse">Sorteo</h1>
           <div className="w-12 h-1 bg-white/20 rounded-full overflow-hidden">
             <div className="h-full bg-white animate-[loading_1.5s_ease-in-out_infinite]" />
           </div>
         </div>
       </div>
     );
+  }
+
+  // Render Public Routes
+  if (isPublicRoute) {
+    const slug = pathParts[0];
+    const shortId = pathParts[1];
+    if (shortId) {
+      return <PublicRaffle slug={slug} shortId={shortId} />;
+    }
+    return <PublicProfile slug={slug} />;
   }
 
   if (!token) {
@@ -105,6 +144,7 @@ export default function App() {
         selectedRaffleId ? (
           <RaffleDetail 
             raffleId={selectedRaffleId} 
+            user={user}
             onBack={() => setSelectedRaffleId(null)} 
           />
         ) : (
@@ -122,10 +162,7 @@ export default function App() {
       )}
       {activeTab === "subscription" && <Subscription user={user} />}
       {activeTab === "settings" && (
-        <div className="bg-white p-10 rounded-[3rem] border border-gray-100 shadow-sm">
-          <h2 className="text-2xl font-bold mb-4">Configuración</h2>
-          <p className="text-gray-500">Próximamente: Ajustes de perfil, notificaciones y datos bancarios.</p>
-        </div>
+        <Settings user={user} onUserUpdate={setUser} />
       )}
     </Layout>
   );

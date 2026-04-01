@@ -6,12 +6,23 @@ import cors from "cors";
 import Database from "better-sqlite3";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import fs from "fs"; // added for migration logic
+import crypto from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("sorteo.db"); // renamed: kouun.db → sorteo.db
-const JWT_SECRET = process.env.JWT_SECRET || "sorteo-secret-key"; // renamed: kouun-secret-key → sorteo-secret-key
+// Migration logic: KOUUN → Sorteo
+const OLD_DB_PATH = "kouun.db";
+const NEW_DB_PATH = "sorteo.db";
+
+if (fs.existsSync(OLD_DB_PATH) && !fs.existsSync(NEW_DB_PATH)) {
+  console.log(`Migrating database from ${OLD_DB_PATH} to ${NEW_DB_PATH}...`);
+  fs.copyFileSync(OLD_DB_PATH, NEW_DB_PATH);
+}
+
+const db = new Database(NEW_DB_PATH); // renamed: KOUUN → Sorteo
+const JWT_SECRET = process.env.JWT_SECRET || "sorteo-secret-key"; // renamed: KOUUN → Sorteo
 
 // Initialize Database Schema
 db.exec(`
@@ -20,14 +31,22 @@ db.exec(`
     email TEXT UNIQUE NOT NULL,
     password TEXT NOT NULL,
     name TEXT NOT NULL,
+    phone TEXT,
+    business_name TEXT,
+    business_slug TEXT UNIQUE,
     plan TEXT DEFAULT 'trial',
     subscription_end DATETIME,
+    bank_name TEXT,
+    bank_clabe TEXT,
+    bank_account_holder TEXT,
+    bank_alias TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS raffles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
+    short_id TEXT UNIQUE,
     title TEXT NOT NULL,
     description TEXT,
     type TEXT NOT NULL, -- 'simple' or 'opportunities'
@@ -60,7 +79,73 @@ db.exec(`
     number TEXT NOT NULL,
     FOREIGN KEY (ticket_id) REFERENCES tickets(id)
   );
+
+  CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    expires_at DATETIME NOT NULL,
+    used INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS mp_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER UNIQUE NOT NULL,
+    access_token_encrypted TEXT NOT NULL,
+    refresh_token_encrypted TEXT NOT NULL,
+    mp_user_id TEXT NOT NULL,
+    expires_at DATETIME,
+    connected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
 `);
+
+// Migration: Add missing columns to users table if they don't exist
+const migrateTable = (tableName: string, requiredColumns: { name: string, type: string }[]) => {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as any[];
+  const columnNames = columns.map(c => c.name);
+
+  for (const col of requiredColumns) {
+    if (!columnNames.includes(col.name)) {
+      console.log(`Adding missing column ${col.name} to ${tableName} table...`);
+      db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${col.name} ${col.type}`);
+    }
+  }
+};
+
+migrateTable("users", [
+  { name: "phone", type: "TEXT" },
+  { name: "business_name", type: "TEXT" },
+  { name: "business_slug", type: "TEXT UNIQUE" },
+  { name: "bank_name", type: "TEXT" },
+  { name: "bank_clabe", type: "TEXT" },
+  { name: "bank_account_holder", type: "TEXT" },
+  { name: "bank_alias", type: "TEXT" },
+  { name: "mp_checkout_enabled", type: "INTEGER DEFAULT 0" }
+]);
+
+migrateTable("raffles", [
+  { name: "short_id", type: "TEXT UNIQUE" },
+  { name: "opportunities_per_ticket", type: "INTEGER DEFAULT 1" },
+  { name: "distribution_type", type: "TEXT DEFAULT 'linear'" },
+  { name: "currency", type: "TEXT DEFAULT 'MXN'" }
+]);
+
+migrateTable("tickets", [
+  { name: "participant_whatsapp", type: "TEXT" },
+  { name: "locked_at", type: "DATETIME" }
+]);
 
 async function startServer() {
   const app = express();
@@ -68,6 +153,50 @@ async function startServer() {
 
   app.use(cors());
   app.use(express.json());
+
+  // Helper: Generate Short ID
+  const generateShortId = (length = 6) => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  };
+
+  const getUniqueShortId = () => {
+    let shortId = generateShortId();
+    while (db.prepare("SELECT id FROM raffles WHERE short_id = ?").get(shortId)) {
+      shortId = generateShortId();
+    }
+    return shortId;
+  };
+
+  // Mercado Pago Config
+  const MP_CLIENT_ID = process.env.MP_CLIENT_ID;
+  const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET;
+  const MP_MARKETPLACE_FEE_PERCENT = parseFloat(process.env.MP_MARKETPLACE_FEE_PERCENT || "3");
+  const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "01234567890123456789012345678901"; // 32 bytes
+  const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+
+  // Encryption Helpers
+  const encrypt = (text: string) => {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    let encrypted = cipher.update(text);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    return iv.toString('hex') + ':' + encrypted.toString('hex');
+  };
+
+  const decrypt = (text: string) => {
+    const textParts = text.split(':');
+    const iv = Buffer.from(textParts.shift()!, 'hex');
+    const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString();
+  };
 
   // Auth Middleware
   const authenticateToken = (req: any, res: any, next: any) => {
@@ -104,13 +233,120 @@ async function startServer() {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, user: { id: user.id, email: user.email, name: user.name, plan: user.plan } });
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '15m' });
+    const refreshToken = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30); // 30 days
+
+    db.prepare("INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (?, ?, ?)").run(user.id, refreshToken, expiresAt.toISOString());
+
+    res.json({ 
+      token, 
+      refreshToken,
+      user: { id: user.id, email: user.email, name: user.name, plan: user.plan } 
+    });
+  });
+
+  app.post("/api/auth/refresh", (req, res) => {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return res.status(400).json({ error: "Refresh token required" });
+
+    const storedToken = db.prepare("SELECT * FROM refresh_tokens WHERE token = ?").get(refreshToken) as any;
+    if (!storedToken) return res.status(401).json({ error: "Invalid refresh token" });
+
+    if (new Date(storedToken.expires_at) < new Date()) {
+      db.prepare("DELETE FROM refresh_tokens WHERE token = ?").run(refreshToken);
+      return res.status(401).json({ error: "Refresh token expired" });
+    }
+
+    const user = db.prepare("SELECT * FROM users WHERE id = ?").get(storedToken.user_id) as any;
+    if (!user) return res.status(401).json({ error: "User not found" });
+
+    const newToken = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '15m' });
+    res.json({ token: newToken });
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    const { refreshToken } = req.body;
+    if (refreshToken) {
+      db.prepare("DELETE FROM refresh_tokens WHERE token = ?").run(refreshToken);
+    }
+    res.json({ success: true });
+  });
+
+  app.post("/api/auth/forgot-password", (req, res) => {
+    const { email } = req.body;
+    const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+
+    // Always return success message for security
+    const response = { message: "Si el email existe, recibirás instrucciones para restablecer tu contraseña." };
+
+    if (user) {
+      const token = crypto.randomBytes(32).toString('hex');
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + 1); // 1 hour
+
+      db.prepare("INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)").run(user.id, token, expiresAt.toISOString());
+
+      // TODO: Integrar nodemailer/Resend para enviar el email real.
+      // Por ahora, devolvemos el token en la respuesta para el MVP.
+      return res.json({ ...response, token });
+    }
+
+    res.json(response);
+  });
+
+  app.post("/api/auth/reset-password", async (req, res) => {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: "Token and password required" });
+
+    const resetRequest = db.prepare("SELECT * FROM password_resets WHERE token = ? AND used = 0").get(token) as any;
+    if (!resetRequest) return res.status(400).json({ error: "Token inválido o ya utilizado" });
+
+    if (new Date(resetRequest.expires_at) < new Date()) {
+      return res.status(400).json({ error: "Token expirado" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    db.prepare("UPDATE users SET password = ? WHERE id = ?").run(hashedPassword, resetRequest.user_id);
+    db.prepare("UPDATE password_resets SET used = 1 WHERE id = ?").run(resetRequest.id);
+
+    res.json({ success: true, message: "Contraseña actualizada correctamente" });
   });
 
   app.get("/api/user/profile", authenticateToken, (req: any, res) => {
-    const user = db.prepare("SELECT id, email, name, plan, subscription_end FROM users WHERE id = ?").get(req.user.id);
+    const user = db.prepare("SELECT id, email, name, phone, plan, subscription_end, bank_name, bank_clabe, bank_account_holder, bank_alias, business_name, business_slug, mp_checkout_enabled FROM users WHERE id = ?").get(req.user.id);
     res.json(user);
+  });
+
+  app.put("/api/user/profile", authenticateToken, (req: any, res) => {
+    const { name, phone, business_name, business_slug, mp_checkout_enabled } = req.body;
+    
+    // Simple slug validation
+    if (business_slug && !/^[a-z0-9-]+$/.test(business_slug)) {
+      return res.status(400).json({ error: "El slug solo puede contener letras minúsculas, números y guiones" });
+    }
+
+    try {
+      const stmt = db.prepare("UPDATE users SET name = ?, phone = ?, business_name = ?, business_slug = ?, mp_checkout_enabled = ? WHERE id = ?");
+      stmt.run(name, phone, business_name, business_slug, mp_checkout_enabled ? 1 : 0, req.user.id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(400).json({ error: "El slug ya está en uso" });
+    }
+  });
+
+  app.put("/api/user/bank-info", authenticateToken, (req: any, res) => {
+    const { bank_name, bank_clabe, bank_account_holder, bank_alias } = req.body;
+    
+    // Simple CLABE validation: 18 digits
+    if (bank_clabe && !/^\d{18}$/.test(bank_clabe)) {
+      return res.status(400).json({ error: "La CLABE debe tener exactamente 18 dígitos numéricos" });
+    }
+
+    const stmt = db.prepare("UPDATE users SET bank_name = ?, bank_clabe = ?, bank_account_holder = ?, bank_alias = ? WHERE id = ?");
+    stmt.run(bank_name, bank_clabe, bank_account_holder, bank_alias, req.user.id);
+    res.json({ success: true });
   });
 
   // Raffle Routes
@@ -131,12 +367,14 @@ async function startServer() {
       }
     }
 
+    const shortId = getUniqueShortId();
+
     const stmt = db.prepare(`
-      INSERT INTO raffles (user_id, title, description, type, ticket_count, opportunities_per_ticket, distribution_type, ticket_price, currency, draw_date)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO raffles (user_id, short_id, title, description, type, ticket_count, opportunities_per_ticket, distribution_type, ticket_price, currency, draw_date)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
-    const info = stmt.run(req.user.id, title, description, type, ticket_count, opportunities_per_ticket, distribution_type, ticket_price, currency, draw_date);
+    const info = stmt.run(req.user.id, shortId, title, description, type, ticket_count, opportunities_per_ticket, distribution_type, ticket_price, currency, draw_date);
     const raffleId = info.lastInsertRowid;
 
     // Generate tickets
@@ -241,6 +479,382 @@ async function startServer() {
     `).get(req.user.id);
     res.json(stats);
   });
+
+  app.get("/api/dashboard/sales-by-raffle", authenticateToken, (req: any, res) => {
+    const sales = db.prepare(`
+      SELECT 
+        r.id as raffle_id, 
+        r.title, 
+        SUM(CASE WHEN t.status = 'paid' THEN 1 ELSE 0 END) as paid_count,
+        SUM(CASE WHEN t.status = 'reserved' THEN 1 ELSE 0 END) as reserved_count,
+        r.ticket_price
+      FROM raffles r
+      LEFT JOIN tickets t ON r.id = t.raffle_id
+      WHERE r.user_id = ?
+      GROUP BY r.id
+      ORDER BY r.created_at DESC
+      LIMIT 10
+    `).all(req.user.id);
+    res.json(sales);
+  });
+
+  app.get("/api/dashboard/revenue-timeline", authenticateToken, (req: any, res) => {
+    const timeline = db.prepare(`
+      SELECT 
+        date(t.paid_at) as date,
+        SUM(r.ticket_price) as revenue
+      FROM tickets t
+      JOIN raffles r ON t.raffle_id = r.id
+      WHERE r.user_id = ? AND t.status = 'paid' AND t.paid_at >= date('now', '-30 days')
+      GROUP BY date(t.paid_at)
+      ORDER BY date ASC
+    `).all(req.user.id) as any[];
+
+    // Fill in missing dates
+    const result = [];
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().split('T')[0];
+      const entry = timeline.find(t => t.date === dateStr);
+      result.push({
+        date: dateStr,
+        revenue: entry ? entry.revenue : 0
+      });
+    }
+    res.json(result);
+  });
+
+  app.get("/api/dashboard/recent-activity", authenticateToken, (req: any, res) => {
+    const activity = db.prepare(`
+      SELECT * FROM (
+        SELECT 'reserved' as type, t.number as ticket_number, t.participant_name, r.title as raffle_title, t.reserved_at as timestamp 
+        FROM tickets t 
+        JOIN raffles r ON t.raffle_id = r.id 
+        WHERE r.user_id = ? AND t.reserved_at IS NOT NULL
+        
+        UNION ALL
+        
+        SELECT 'paid' as type, t.number as ticket_number, t.participant_name, r.title as raffle_title, t.paid_at as timestamp 
+        FROM tickets t 
+        JOIN raffles r ON t.raffle_id = r.id 
+        WHERE r.user_id = ? AND t.paid_at IS NOT NULL
+        
+        UNION ALL
+        
+        SELECT 'raffle_created' as type, NULL as ticket_number, NULL as participant_name, title as raffle_title, created_at as timestamp 
+        FROM raffles 
+        WHERE user_id = ?
+      )
+      ORDER BY timestamp DESC
+      LIMIT 20
+    `).all(req.user.id, req.user.id, req.user.id);
+    res.json(activity);
+  });
+
+  app.get("/api/dashboard/upcoming-raffles", authenticateToken, (req: any, res) => {
+    const upcoming = db.prepare(`
+      SELECT 
+        r.id, r.short_id, r.title, r.draw_date, r.ticket_count,
+        COUNT(t.id) as sold_count
+      FROM raffles r
+      LEFT JOIN tickets t ON r.id = t.raffle_id AND t.status IN ('paid', 'reserved', 'processing')
+      WHERE r.user_id = ? AND r.status = 'active' AND r.draw_date >= date('now')
+      GROUP BY r.id
+      ORDER BY r.draw_date ASC
+      LIMIT 5
+    `).all(req.user.id);
+    res.json(upcoming);
+  });
+
+  // Mercado Pago Routes
+  app.get("/api/mp/connect", authenticateToken, (req: any, res) => {
+    if (!MP_CLIENT_ID) return res.status(500).json({ error: "Mercado Pago no está configurado" });
+    
+    const state = jwt.sign({ userId: req.user.id }, JWT_SECRET, { expiresIn: '10m' });
+    const redirectUri = `${APP_URL}/api/mp/callback`;
+    const authUrl = `https://auth.mercadopago.com.mx/authorization?client_id=${MP_CLIENT_ID}&response_type=code&platform_id=mp&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
+    
+    res.json({ url: authUrl });
+  });
+
+  app.get("/api/mp/callback", async (req, res) => {
+    const { code, state } = req.query;
+    if (!code || !state) return res.status(400).send("Faltan parámetros");
+
+    try {
+      const decoded = jwt.verify(state as string, JWT_SECRET) as any;
+      const userId = decoded.userId;
+
+      const redirectUri = `${APP_URL}/api/mp/callback`;
+      const response = await fetch("https://api.mercadopago.com/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: MP_CLIENT_ID,
+          client_secret: MP_CLIENT_SECRET,
+          code,
+          grant_type: "authorization_code",
+          redirect_uri: redirectUri,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.error) throw new Error(data.message || data.error);
+
+      const accessTokenEnc = encrypt(data.access_token);
+      const refreshTokenEnc = encrypt(data.refresh_token);
+      const expiresAt = new Date();
+      expiresAt.setSeconds(expiresAt.getSeconds() + data.expires_in);
+
+      db.prepare(`
+        INSERT INTO mp_credentials (user_id, access_token_encrypted, refresh_token_encrypted, mp_user_id, expires_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          access_token_encrypted = excluded.access_token_encrypted,
+          refresh_token_encrypted = excluded.refresh_token_encrypted,
+          mp_user_id = excluded.mp_user_id,
+          expires_at = excluded.expires_at,
+          connected_at = CURRENT_TIMESTAMP
+      `).run(userId, accessTokenEnc, refreshTokenEnc, data.user_id, expiresAt.toISOString());
+
+      res.redirect("/settings?mp=connected");
+    } catch (error: any) {
+      console.error("MP Callback Error:", error);
+      res.redirect("/settings?mp=error");
+    }
+  });
+
+  app.get("/api/mp/status", authenticateToken, (req: any, res) => {
+    const creds = db.prepare("SELECT mp_user_id FROM mp_credentials WHERE user_id = ?").get(req.user.id) as any;
+    res.json({ connected: !!creds, mp_user_id: creds?.mp_user_id });
+  });
+
+  app.post("/api/mp/disconnect", authenticateToken, (req: any, res) => {
+    db.prepare("DELETE FROM mp_credentials WHERE user_id = ?").run(req.user.id);
+    res.json({ success: true });
+  });
+
+  // Public Endpoints
+  app.get("/api/public/:slug", (req, res) => {
+    const user = db.prepare("SELECT id, business_name, business_slug FROM users WHERE business_slug = ?").get(req.params.slug) as any;
+    if (!user) return res.status(404).json({ error: "Rifero no encontrado" });
+
+    const raffles = db.prepare(`
+      SELECT 
+        r.id, r.short_id, r.title, r.ticket_count, r.ticket_price, r.draw_date, r.currency,
+        (SELECT COUNT(*) FROM tickets WHERE raffle_id = r.id AND status IN ('paid', 'reserved', 'processing')) as sold_count
+      FROM raffles r
+      WHERE r.user_id = ? AND r.status = 'active'
+      ORDER BY r.created_at DESC
+    `).all(user.id);
+
+    res.json({ user, raffles });
+  });
+
+  app.get("/api/public/:slug/:shortId", (req, res) => {
+    const user = db.prepare("SELECT id, business_name, business_slug, phone, bank_name, bank_clabe, bank_account_holder, bank_alias, mp_checkout_enabled FROM users WHERE business_slug = ?").get(req.params.slug) as any;
+    if (!user) return res.status(404).json({ error: "Rifero no encontrado" });
+
+    const raffle = db.prepare("SELECT * FROM raffles WHERE short_id = ? AND user_id = ?").get(req.params.shortId, user.id) as any;
+    if (!raffle) return res.status(404).json({ error: "Rifa no encontrada" });
+
+    const tickets = db.prepare(`
+      SELECT t.id, t.number, t.status, GROUP_CONCAT(o.number) as opportunities
+      FROM tickets t
+      LEFT JOIN ticket_opportunities o ON t.id = o.ticket_id
+      WHERE t.raffle_id = ?
+      GROUP BY t.id
+    `).all(raffle.id);
+
+    const mpCreds = db.prepare("SELECT mp_user_id FROM mp_credentials WHERE user_id = ?").get(user.id);
+
+    // Don't expose user private info
+    const publicUser = {
+      business_name: user.business_name,
+      business_slug: user.business_slug,
+      phone: user.phone,
+      bank_name: user.bank_name,
+      bank_clabe: user.bank_clabe,
+      bank_account_holder: user.bank_account_holder,
+      bank_alias: user.bank_alias,
+      mp_enabled: !!mpCreds && user.mp_checkout_enabled === 1
+    };
+
+    res.json({ user: publicUser, raffle: { ...raffle, tickets } });
+  });
+
+  app.post("/api/public/:slug/:shortId/reserve", (req, res) => {
+    const { ticket_id, participant_name, participant_whatsapp } = req.body;
+    
+    const user = db.prepare("SELECT id FROM users WHERE business_slug = ?").get(req.params.slug) as any;
+    if (!user) return res.status(404).json({ error: "Rifero no encontrado" });
+
+    const raffle = db.prepare("SELECT id FROM raffles WHERE short_id = ? AND user_id = ?").get(req.params.shortId, user.id) as any;
+    if (!raffle) return res.status(404).json({ error: "Rifa no encontrada" });
+
+    try {
+      db.transaction(() => {
+        const stmt = db.prepare("UPDATE tickets SET participant_name = ?, participant_whatsapp = ?, status = 'reserved', reserved_at = CURRENT_TIMESTAMP WHERE id = ? AND raffle_id = ? AND status = 'available'");
+        const info = stmt.run(participant_name, participant_whatsapp, ticket_id, raffle.id);
+
+        if (info.changes === 0) {
+          throw new Error("already_taken");
+        }
+      })();
+
+      const updatedTicket = db.prepare("SELECT * FROM tickets WHERE id = ?").get(ticket_id);
+      res.json({ success: true, ticket: updatedTicket });
+    } catch (error: any) {
+      if (error.message === "already_taken") {
+        res.status(400).json({ error: "already_taken" });
+      } else {
+        res.status(500).json({ error: "Error al reservar" });
+      }
+    }
+  });
+
+  app.post("/api/public/:slug/:shortId/checkout", async (req, res) => {
+    const { ticket_id, participant_name, participant_whatsapp } = req.body;
+    
+    const user = db.prepare("SELECT id, business_slug FROM users WHERE business_slug = ?").get(req.params.slug) as any;
+    if (!user) return res.status(404).json({ error: "Rifero no encontrado" });
+
+    const raffle = db.prepare("SELECT id, title, ticket_price, currency FROM raffles WHERE short_id = ? AND user_id = ?").get(req.params.shortId, user.id) as any;
+    if (!raffle) return res.status(404).json({ error: "Rifa no encontrada" });
+
+    const mpCreds = db.prepare("SELECT access_token_encrypted FROM mp_credentials WHERE user_id = ?").get(user.id) as any;
+    if (!mpCreds) return res.status(400).json({ error: "El rifero no tiene Mercado Pago conectado" });
+
+    try {
+      let ticket: any;
+      db.transaction(() => {
+        const stmt = db.prepare("UPDATE tickets SET participant_name = ?, participant_whatsapp = ?, status = 'processing', locked_at = CURRENT_TIMESTAMP WHERE id = ? AND raffle_id = ? AND status = 'available'");
+        const info = stmt.run(participant_name, participant_whatsapp, ticket_id, raffle.id);
+
+        if (info.changes === 0) {
+          throw new Error("already_taken");
+        }
+        ticket = db.prepare("SELECT * FROM tickets WHERE id = ?").get(ticket_id);
+      })();
+
+      const accessToken = decrypt(mpCreds.access_token_encrypted);
+      const fee = raffle.ticket_price * (MP_MARKETPLACE_FEE_PERCENT / 100);
+
+      const response = await fetch("https://api.mercadopago.com/checkout/preferences", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          items: [{
+            title: `Boleto #${ticket.number} - ${raffle.title}`,
+            unit_price: raffle.ticket_price,
+            quantity: 1,
+            currency_id: raffle.currency || "MXN"
+          }],
+          payer: {
+            name: participant_name,
+          },
+          back_urls: {
+            success: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=true`,
+            failure: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=false`,
+            pending: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=pending`,
+          },
+          auto_return: "approved",
+          notification_url: `${APP_URL}/api/mp/webhook`,
+          marketplace_fee: fee,
+          metadata: {
+            ticket_id: ticket.id,
+            raffle_id: raffle.id,
+            participant_whatsapp
+          },
+          external_reference: String(ticket.id)
+        }),
+      });
+
+      const preference = await response.json();
+      if (preference.error) throw new Error(preference.message || preference.error);
+
+      res.json({ preference_id: preference.id, init_point: preference.init_point });
+    } catch (error: any) {
+      console.error("Checkout Error:", error);
+      if (error.message === "already_taken") {
+        res.status(400).json({ error: "already_taken" });
+      } else {
+        res.status(500).json({ error: "Error al crear preferencia de pago" });
+      }
+    }
+  });
+
+  app.post("/api/mp/webhook", async (req, res) => {
+    const { action, data, type } = req.body;
+    
+    // Mercado Pago sends notifications for both 'payment' and 'plan' etc.
+    if (type === 'payment' || action === 'payment.created' || action === 'payment.updated') {
+      const paymentId = data?.id || req.query.id;
+      if (!paymentId) return res.sendStatus(200);
+
+      try {
+        // We need an access token to verify. 
+        // Since we don't know which user this belongs to yet, we might need to query the payment first.
+        // But MP webhooks for marketplace usually require the platform's access token or the seller's.
+        // For simplicity, we'll try to find the ticket by external_reference if provided.
+        
+        // Actually, MP sends the payment details. We can fetch it.
+        // We'll use the MP_CLIENT_SECRET (or a generic access token if we had one) to fetch payment details.
+        // Wait, for marketplace, we should probably use the seller's token if we can identify them.
+        
+        // Let's use a simple approach: fetch payment details using the seller's token.
+        // But we don't know the seller yet. 
+        // MP metadata might help if we can get it without the token.
+        
+        // Better: MP sends the payment ID. We can fetch it with the platform's credentials if it's a marketplace payment?
+        // Actually, usually you use the seller's token.
+        
+        // Let's try to find the ticket first.
+        // We'll fetch the payment details from MP.
+        // We need a valid access token. Let's use the first one we find or the one from the user associated with the ticket.
+        
+        // 1. Fetch payment details (requires token)
+        // We'll try to fetch it using the platform's secret if possible, or iterate? No.
+        // Let's assume we can fetch it with the client secret or we need to find the user.
+        
+        // Actually, MP sends 'resource' URL.
+        const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+          headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN || MP_CLIENT_SECRET}` }
+        });
+        const payment = await paymentResponse.json();
+        
+        if (payment.status === 'approved') {
+          const ticketId = payment.external_reference || payment.metadata?.ticket_id;
+          if (ticketId) {
+            db.prepare("UPDATE tickets SET status = 'paid', paid_at = CURRENT_TIMESTAMP, locked_at = NULL WHERE id = ? AND status != 'paid'").run(ticketId);
+          }
+        } else if (payment.status === 'rejected' || payment.status === 'cancelled') {
+          const ticketId = payment.external_reference || payment.metadata?.ticket_id;
+          if (ticketId) {
+            db.prepare("UPDATE tickets SET status = 'available', participant_name = NULL, participant_whatsapp = NULL, locked_at = NULL WHERE id = ? AND status = 'processing'").run(ticketId);
+          }
+        }
+      } catch (error) {
+        console.error("Webhook Error:", error);
+      }
+    }
+    
+    res.sendStatus(200);
+  });
+
+  // Cleanup Job: Expired Locks
+  setInterval(() => {
+    const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    db.prepare("UPDATE tickets SET status = 'available', participant_name = NULL, participant_whatsapp = NULL, locked_at = NULL WHERE status = 'processing' AND locked_at < ?").run(fifteenMinsAgo);
+  }, 5 * 60 * 1000); // Every 5 minutes
+
+  // Run cleanup on start
+  const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  db.prepare("UPDATE tickets SET status = 'available', participant_name = NULL, participant_whatsapp = NULL, locked_at = NULL WHERE status = 'processing' AND locked_at < ?").run(fifteenMinsAgo);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {

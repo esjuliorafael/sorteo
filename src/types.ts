@@ -2,13 +2,22 @@ export interface User {
   id: number;
   email: string;
   name: string;
+  phone?: string;
+  business_name?: string;
+  business_slug?: string;
+  mp_checkout_enabled?: boolean;
   plan: 'trial' | '3m' | '6m' | 'annual';
   subscription_end?: string;
+  bank_name?: string;
+  bank_clabe?: string;
+  bank_account_holder?: string;
+  bank_alias?: string;
 }
 
 export interface Raffle {
   id: number;
   user_id: number;
+  short_id: string;
   title: string;
   description?: string;
   type: 'simple' | 'opportunities';
