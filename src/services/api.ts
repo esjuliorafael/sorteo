@@ -46,6 +46,7 @@ async function request(endpoint: string, options: RequestInit = {}, retry = true
     }
   }
 
+  // Handle errors (including 429 Too Many Requests)
   if (!res.ok) {
     const text = await res.text();
     let errorMessage = text;

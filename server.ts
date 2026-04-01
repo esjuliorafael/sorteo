@@ -8,6 +8,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import fs from "fs"; // added for migration logic
 import crypto from "crypto";
+import { rateLimit } from "express-rate-limit";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -213,8 +214,39 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  app.set('trust proxy', 1);
+
   app.use(cors());
   app.use(express.json());
+
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: isDev ? 100 : 10,
+    message: { error: "Demasiados intentos. Por favor espera 15 minutos." },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, forwardedHeader: false },
+  });
+
+  const forgotPasswordLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: isDev ? 30 : 3,
+    message: { error: "Demasiadas solicitudes de recuperación. Intenta en una hora." },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, forwardedHeader: false },
+  });
+
+  const refreshLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: isDev ? 300 : 30,
+    message: { error: "Límite de renovación de sesión alcanzado." },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, forwardedHeader: false },
+  });
 
   // Helper: Generate Short ID
   const generateShortId = (length = 6) => {
@@ -238,21 +270,42 @@ async function startServer() {
   const MP_CLIENT_ID = process.env.MP_CLIENT_ID;
   const MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET;
   const MP_MARKETPLACE_FEE_PERCENT = parseFloat(process.env.MP_MARKETPLACE_FEE_PERCENT || "3");
-  const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "01234567890123456789012345678901"; // 32 bytes
+  const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
   const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
+  // Config Check
+  let KEY: string;
+  if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) {
+    if (isDev) {
+      console.warn('[Config] ENCRYPTION_KEY no configurada o inválida. Usando clave de desarrollo temporal.');
+      KEY = "development_key_32_chars_exactly_"; // 32 chars
+    } else {
+      throw new Error(
+        '[Config] ENCRYPTION_KEY es requerida y debe tener exactamente ' +
+        '32 caracteres en producción. Genera una con: node -e "console.log(require(\'crypto\')' +
+        '.randomBytes(16).toString(\'hex\'))"'
+      );
+    }
+  } else {
+    KEY = ENCRYPTION_KEY;
+  }
+
+  if (!process.env.JWT_SECRET) {
+    console.warn('[Config] JWT_SECRET no definido — usando valor por defecto inseguro.');
+  }
+  if (!MP_CLIENT_ID || !MP_CLIENT_SECRET) {
+    console.warn('[Config] MP_CLIENT_ID / MP_CLIENT_SECRET no definidos — ' +
+      'la conexión con Mercado Pago estará deshabilitada.');
+  }
   if (!process.env.MP_ACCESS_TOKEN) {
-    console.warn(
-      '[MP] ADVERTENCIA: MP_ACCESS_TOKEN no está definido en .env. ' +
-      'El webhook de Mercado Pago no podrá consultar pagos y los boletos ' +
-      'NO se marcarán como pagados automáticamente.'
-    );
+    console.warn('[Config] MP_ACCESS_TOKEN no definido — ' +
+      'el webhook no podrá procesar pagos.');
   }
 
   // Encryption Helpers
   const encrypt = (text: string) => {
     const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(KEY), iv);
     let encrypted = cipher.update(text);
     encrypted = Buffer.concat([encrypted, cipher.final()]);
     return iv.toString('hex') + ':' + encrypted.toString('hex');
@@ -262,7 +315,7 @@ async function startServer() {
     const textParts = text.split(':');
     const iv = Buffer.from(textParts.shift()!, 'hex');
     const encryptedText = Buffer.from(textParts.join(':'), 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(ENCRYPTION_KEY), iv);
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(KEY), iv);
     let decrypted = decipher.update(encryptedText);
     decrypted = Buffer.concat([decrypted, decipher.final()]);
     return decrypted.toString();
@@ -283,7 +336,7 @@ async function startServer() {
   };
 
   // Auth Routes
-  app.post("/api/auth/register", async (req, res) => {
+  app.post("/api/auth/register", authLimiter, async (req, res) => {
     const { email, password, name } = req.body;
     try {
       const hashedPassword = await bcrypt.hash(password, 10);
@@ -295,7 +348,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", authLimiter, async (req, res) => {
     const { email, password } = req.body;
     const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
 
@@ -317,7 +370,7 @@ async function startServer() {
     });
   });
 
-  app.post("/api/auth/refresh", (req, res) => {
+  app.post("/api/auth/refresh", refreshLimiter, (req, res) => {
     const { refreshToken } = req.body;
     if (!refreshToken) return res.status(400).json({ error: "Refresh token required" });
 
@@ -344,7 +397,7 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.post("/api/auth/forgot-password", (req, res) => {
+  app.post("/api/auth/forgot-password", forgotPasswordLimiter, (req, res) => {
     const { email } = req.body;
     const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
 
