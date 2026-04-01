@@ -73,7 +73,7 @@ export default function App() {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center">
         <div className="flex flex-col items-center space-y-4">
-          <h1 className="text-4xl font-black tracking-tighter text-white animate-pulse">KOUUN</h1>
+          <h1 className="text-4xl font-black tracking-tighter text-white animate-pulse">Sorteo</h1>{/* renamed: KOUUN → Sorteo */}
           <div className="w-12 h-1 bg-white/20 rounded-full overflow-hidden">
             <div className="h-full bg-white animate-[loading_1.5s_ease-in-out_infinite]" />
           </div>
