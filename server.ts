@@ -109,7 +109,52 @@ db.exec(`
     connected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS promo_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT UNIQUE NOT NULL,
+    description TEXT,
+    type TEXT NOT NULL, -- 'discount_percent', 'discount_fixed', 'free_plan', 'extend_days'
+    value REAL NOT NULL,
+    applicable_plans TEXT DEFAULT 'all', -- 'all' or '3m,6m,annual'
+    plan_granted TEXT,
+    max_uses INTEGER DEFAULT NULL,
+    used_count INTEGER DEFAULT 0,
+    expires_at DATETIME DEFAULT NULL,
+    is_active INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS promo_redemptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    promo_code_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    plan_id TEXT NOT NULL,
+    discount_applied REAL NOT NULL,
+    status TEXT DEFAULT 'completed', -- 'completed' or 'pending'
+    redeemed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
 `);
+
+// Insert test promo codes
+const testCodes = [
+  { code: 'SORTEO2026', type: 'discount_percent', value: 30, applicable_plans: 'all', description: '30% OFF en cualquier plan' },
+  { code: 'BETA1MES', type: 'free_plan', value: 0, plan_granted: '3m', max_uses: 50, applicable_plans: '3m', description: 'Beta tester: 3 meses gratis' },
+  { code: 'LAUNCH50', type: 'discount_fixed', value: 150, applicable_plans: 'annual', description: '$150 MXN OFF en plan anual' }
+];
+
+for (const pc of testCodes) {
+  try {
+    db.prepare(`
+      INSERT INTO promo_codes (code, type, value, applicable_plans, plan_granted, max_uses, description)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(pc.code, pc.type, pc.value, pc.applicable_plans, pc.plan_granted || null, pc.max_uses || null, pc.description);
+  } catch (e) {
+    // Ignore if already exists
+  }
+}
 
 // Migration: Add missing columns to users table if they don't exist
 const migrateTable = (tableName: string, requiredColumns: { name: string, type: string }[]) => {
@@ -633,6 +678,130 @@ async function startServer() {
   app.post("/api/mp/disconnect", authenticateToken, (req: any, res) => {
     db.prepare("DELETE FROM mp_credentials WHERE user_id = ?").run(req.user.id);
     res.json({ success: true });
+  });
+
+  // Promo Code Routes
+  const PLAN_PRICES: Record<string, number> = {
+    'trial': 0,
+    '3m': 299,
+    '6m': 499,
+    'annual': 799
+  };
+
+  app.post("/api/promo/validate", authenticateToken, (req: any, res) => {
+    const { code, plan_id } = req.body;
+    if (!code || !plan_id) return res.status(400).json({ valid: false, error: "Código y plan requeridos" });
+
+    const promo = db.prepare("SELECT * FROM promo_codes WHERE UPPER(code) = ? AND is_active = 1").get(code.toUpperCase()) as any;
+    
+    if (!promo) return res.json({ valid: false, error: "Código no encontrado" });
+
+    // Expiration check
+    if (promo.expires_at && new Date(promo.expires_at) < new Date()) {
+      return res.json({ valid: false, error: "Código expirado" });
+    }
+
+    // Max uses check
+    if (promo.max_uses !== null && promo.used_count >= promo.max_uses) {
+      return res.json({ valid: false, error: "Código agotado" });
+    }
+
+    // Applicable plans check
+    if (promo.applicable_plans !== 'all') {
+      const allowed = promo.applicable_plans.split(',');
+      if (!allowed.includes(plan_id)) {
+        return res.json({ valid: false, error: "Este código no aplica para el plan seleccionado" });
+      }
+    }
+
+    // User already redeemed check
+    const alreadyRedeemed = db.prepare("SELECT id FROM promo_redemptions WHERE promo_code_id = ? AND user_id = ? AND status = 'completed'").get(promo.id, req.user.id);
+    if (alreadyRedeemed) {
+      return res.json({ valid: false, error: "Ya canjeaste este código" });
+    }
+
+    const originalPrice = PLAN_PRICES[plan_id] || 0;
+    let discountAmount = 0;
+
+    if (promo.type === 'discount_percent') {
+      discountAmount = originalPrice * (promo.value / 100);
+    } else if (promo.type === 'discount_fixed') {
+      discountAmount = promo.value;
+    } else if (promo.type === 'free_plan') {
+      discountAmount = originalPrice;
+    }
+
+    const finalPrice = Math.max(0, originalPrice - discountAmount);
+
+    res.json({
+      valid: true,
+      type: promo.type,
+      original_price: Number(originalPrice.toFixed(2)),
+      discount_amount: Number(discountAmount.toFixed(2)),
+      final_price: Number(finalPrice.toFixed(2)),
+      plan_granted: promo.plan_granted
+    });
+  });
+
+  app.post("/api/promo/redeem", authenticateToken, (req: any, res) => {
+    const { code, plan_id } = req.body;
+    if (!code || !plan_id) return res.status(400).json({ success: false, error: "Código y plan requeridos" });
+
+    const promo = db.prepare("SELECT * FROM promo_codes WHERE UPPER(code) = ? AND is_active = 1").get(code.toUpperCase()) as any;
+    if (!promo) return res.status(400).json({ success: false, error: "Código no encontrado" });
+
+    // Re-run validations
+    if (promo.expires_at && new Date(promo.expires_at) < new Date()) return res.status(400).json({ success: false, error: "Código expirado" });
+    if (promo.max_uses !== null && promo.used_count >= promo.max_uses) return res.status(400).json({ success: false, error: "Código agotado" });
+    
+    if (promo.applicable_plans !== 'all') {
+      const allowed = promo.applicable_plans.split(',');
+      if (!allowed.includes(plan_id)) return res.status(400).json({ success: false, error: "Plan no aplicable" });
+    }
+
+    const alreadyRedeemed = db.prepare("SELECT id FROM promo_redemptions WHERE promo_code_id = ? AND user_id = ? AND status = 'completed'").get(promo.id, req.user.id);
+    if (alreadyRedeemed) return res.status(400).json({ success: false, error: "Ya canjeaste este código" });
+
+    const originalPrice = PLAN_PRICES[plan_id] || 0;
+    let discountAmount = 0;
+    if (promo.type === 'discount_percent') discountAmount = originalPrice * (promo.value / 100);
+    else if (promo.type === 'discount_fixed') discountAmount = promo.value;
+    else if (promo.type === 'free_plan') discountAmount = originalPrice;
+
+    try {
+      db.transaction(() => {
+        // Record redemption
+        const status = promo.type === 'free_plan' ? 'completed' : 'pending';
+        db.prepare("INSERT INTO promo_redemptions (promo_code_id, user_id, plan_id, discount_applied, status) VALUES (?, ?, ?, ?, ?)").run(
+          promo.id, req.user.id, plan_id, discountAmount, status
+        );
+
+        // Increment use count
+        db.prepare("UPDATE promo_codes SET used_count = used_count + 1 WHERE id = ?").run(promo.id);
+
+        // If free_plan, activate directly
+        if (promo.type === 'free_plan') {
+          const planToActivate = promo.plan_granted || plan_id;
+          const monthsToAdd = planToActivate === '3m' ? 3 : (planToActivate === '6m' ? 6 : 12);
+          const subEnd = new Date();
+          subEnd.setMonth(subEnd.getMonth() + monthsToAdd);
+
+          db.prepare("UPDATE users SET plan = ?, subscription_end = ? WHERE id = ?").run(
+            planToActivate, subEnd.toISOString(), req.user.id
+          );
+        }
+      })();
+
+      if (promo.type === 'free_plan') {
+        const user = db.prepare("SELECT plan, subscription_end FROM users WHERE id = ?").get(req.user.id) as any;
+        return res.json({ success: true, plan_activated: true, subscription_end: user.subscription_end });
+      }
+
+      res.json({ success: true, plan_activated: false });
+    } catch (error) {
+      console.error("Redemption Error:", error);
+      res.status(500).json({ success: false, error: "Error al procesar el canje" });
+    }
   });
 
   // Public Endpoints
