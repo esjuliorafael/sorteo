@@ -51,7 +51,7 @@ export default function Auth({ onAuthSuccess }: AuthProps) {
         <div className="absolute top-0 right-0 w-[800px] h-[800px] bg-white/5 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl" />
         
         <div className="relative z-10">
-          <h1 className="text-6xl font-black tracking-tighter mb-4">KOUUN</h1>
+          <h1 className="text-6xl font-black tracking-tighter mb-4">Sorteo</h1>{/* renamed: KOUUN → Sorteo */}
           <p className="text-xl text-gray-400 max-w-md font-medium leading-relaxed">
             La plataforma definitiva para gestionar tus rifas digitales con profesionalismo y transparencia.
           </p>
@@ -88,7 +88,7 @@ export default function Auth({ onAuthSuccess }: AuthProps) {
         </div>
 
         <div className="relative z-10 pt-10 border-t border-white/10">
-          <p className="text-xs text-gray-500 font-bold uppercase tracking-widest">© 2026 KOUUN SaaS B2B</p>
+          <p className="text-xs text-gray-500 font-bold uppercase tracking-widest">© 2026 Sorteo SaaS B2B</p>{/* renamed: KOUUN → Sorteo */}
         </div>
       </div>
 
@@ -96,7 +96,7 @@ export default function Auth({ onAuthSuccess }: AuthProps) {
       <div className="flex-1 flex items-center justify-center p-6 md:p-20">
         <div className="w-full max-w-md space-y-10">
           <div className="lg:hidden text-center mb-10">
-            <h1 className="text-4xl font-black tracking-tighter">KOUUN</h1>
+            <h1 className="text-4xl font-black tracking-tighter">Sorteo</h1>{/* renamed: KOUUN → Sorteo */}
           </div>
 
           <div className="text-center md:text-left">
