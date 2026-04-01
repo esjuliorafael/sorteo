@@ -10,8 +10,8 @@ import jwt from "jsonwebtoken";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("kouun.db");
-const JWT_SECRET = process.env.JWT_SECRET || "kouun-secret-key";
+const db = new Database("sorteo.db"); // renamed: kouun.db → sorteo.db
+const JWT_SECRET = process.env.JWT_SECRET || "sorteo-secret-key"; // renamed: kouun-secret-key → sorteo-secret-key
 
 // Initialize Database Schema
 db.exec(`
