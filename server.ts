@@ -136,6 +136,14 @@ db.exec(`
     FOREIGN KEY (promo_code_id) REFERENCES promo_codes(id),
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS processed_mp_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    payment_id TEXT UNIQUE NOT NULL,
+    ticket_id INTEGER,
+    status TEXT NOT NULL,       -- 'approved' | 'rejected' | 'cancelled'
+    processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Insert test promo codes
@@ -189,7 +197,8 @@ migrateTable("raffles", [
 
 migrateTable("tickets", [
   { name: "participant_whatsapp", type: "TEXT" },
-  { name: "locked_at", type: "DATETIME" }
+  { name: "locked_at", type: "DATETIME" },
+  { name: "mp_payment_id", type: "TEXT" }
 ]);
 
 async function startServer() {
@@ -958,58 +967,117 @@ async function startServer() {
   });
 
   app.post("/api/mp/webhook", async (req, res) => {
-    const { action, data, type } = req.body;
+    const paymentId = req.body.data?.id || req.query.id;
+    const action = req.body.action || req.query.topic; // Handle both formats
     
-    // Mercado Pago sends notifications for both 'payment' and 'plan' etc.
-    if (type === 'payment' || action === 'payment.created' || action === 'payment.updated') {
-      const paymentId = data?.id || req.query.id;
-      if (!paymentId) return res.sendStatus(200);
+    console.log('[MP Webhook] Received notification', { 
+      paymentId, 
+      action,
+      body: JSON.stringify(req.body),
+      query: JSON.stringify(req.query)
+    });
 
-      try {
-        // We need an access token to verify. 
-        // Since we don't know which user this belongs to yet, we might need to query the payment first.
-        // But MP webhooks for marketplace usually require the platform's access token or the seller's.
-        // For simplicity, we'll try to find the ticket by external_reference if provided.
-        
-        // Actually, MP sends the payment details. We can fetch it.
-        // We'll use the MP_CLIENT_SECRET (or a generic access token if we had one) to fetch payment details.
-        // Wait, for marketplace, we should probably use the seller's token if we can identify them.
-        
-        // Let's use a simple approach: fetch payment details using the seller's token.
-        // But we don't know the seller yet. 
-        // MP metadata might help if we can get it without the token.
-        
-        // Better: MP sends the payment ID. We can fetch it with the platform's credentials if it's a marketplace payment?
-        // Actually, usually you use the seller's token.
-        
-        // Let's try to find the ticket first.
-        // We'll fetch the payment details from MP.
-        // We need a valid access token. Let's use the first one we find or the one from the user associated with the ticket.
-        
-        // 1. Fetch payment details (requires token)
-        // We'll try to fetch it using the platform's secret if possible, or iterate? No.
-        // Let's assume we can fetch it with the client secret or we need to find the user.
-        
-        // Actually, MP sends 'resource' URL.
-        const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-          headers: { "Authorization": `Bearer ${process.env.MP_ACCESS_TOKEN || MP_CLIENT_SECRET}` }
-        });
-        const payment = await paymentResponse.json();
-        
-        if (payment.status === 'approved') {
-          const ticketId = payment.external_reference || payment.metadata?.ticket_id;
-          if (ticketId) {
-            db.prepare("UPDATE tickets SET status = 'paid', paid_at = CURRENT_TIMESTAMP, locked_at = NULL WHERE id = ? AND status != 'paid'").run(ticketId);
-          }
-        } else if (payment.status === 'rejected' || payment.status === 'cancelled') {
-          const ticketId = payment.external_reference || payment.metadata?.ticket_id;
-          if (ticketId) {
-            db.prepare("UPDATE tickets SET status = 'available', participant_name = NULL, participant_whatsapp = NULL, locked_at = NULL WHERE id = ? AND status = 'processing'").run(ticketId);
-          }
-        }
-      } catch (error) {
-        console.error("Webhook Error:", error);
+    if (!paymentId) return res.sendStatus(200);
+
+    try {
+      // BUG 2 & FIX 2: Idempotencia - Verificar si ya fue procesado
+      const alreadyProcessed = db.prepare("SELECT id FROM processed_mp_payments WHERE payment_id = ?").get(paymentId);
+      if (alreadyProcessed) {
+        console.log('[MP Webhook] Payment already processed', { paymentId });
+        return res.sendStatus(200);
       }
+
+      // BUG 1 & FIX 1: Obtener el access_token del seller correcto
+      // Intentamos obtener external_reference del body o query
+      const externalReference = req.body.external_reference || req.body.data?.external_reference || req.query.external_reference;
+      
+      if (!externalReference) {
+        console.log('[MP Webhook] No external_reference found, cannot identify seller yet', { paymentId });
+        // En algunos casos MP no lo envía en el webhook, pero sí está en el recurso.
+        // Si no lo tenemos, no podemos seguir el flujo pedido por el usuario de "Buscar el ticket por external_reference"
+        // para obtener el token. 
+        // Sin embargo, si es un Marketplace payment, a veces se puede usar el token de la plataforma.
+        // Pero el usuario fue muy específico con el flujo.
+        return res.sendStatus(200);
+      }
+
+      // b) Buscar el ticket por external_reference
+      const ticket = db.prepare("SELECT * FROM tickets WHERE id = ?").get(externalReference) as any;
+      if (!ticket) {
+        console.log('[MP Webhook] Ticket not found for external_reference', { externalReference, paymentId });
+        return res.sendStatus(200);
+      }
+
+      // c) Con el raffle_id del ticket, obtener el user_id del rifero
+      const raffle = db.prepare("SELECT user_id FROM raffles WHERE id = ?").get(ticket.raffle_id) as any;
+      if (!raffle) {
+        console.log('[MP Webhook] Raffle not found', { raffle_id: ticket.raffle_id, paymentId });
+        return res.sendStatus(200);
+      }
+
+      // d) Obtener el access_token encriptado
+      const mpCreds = db.prepare("SELECT access_token_encrypted FROM mp_credentials WHERE user_id = ?").get(raffle.user_id) as any;
+      if (!mpCreds) {
+        console.log('[MP Webhook] MP credentials not found for seller', { user_id: raffle.user_id, paymentId });
+        return res.sendStatus(200);
+      }
+
+      // e) Desencriptar
+      const accessToken = decrypt(mpCreds.access_token_encrypted);
+
+      // Fetch payment details using the seller's token
+      const paymentResponse = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+        headers: { "Authorization": `Bearer ${accessToken}` }
+      });
+      
+      if (!paymentResponse.ok) {
+        console.error('[MP Webhook] Error fetching payment from MP API', { status: paymentResponse.status, paymentId });
+        return res.sendStatus(200);
+      }
+
+      const payment = await paymentResponse.json();
+      const status = payment.status;
+
+      console.log('[MP Webhook] Processing payment', { paymentId, ticketId: ticket.id, status });
+
+      // Si el status es pending o in_process, no hacemos nada
+      if (status === 'pending' || status === 'in_process') {
+        return res.sendStatus(200);
+      }
+
+      // FIX 2 & 3: Transacción para asegurar consistencia e idempotencia
+      db.transaction(() => {
+        // Doble check de idempotencia dentro de la transacción
+        const exists = db.prepare("SELECT id FROM processed_mp_payments WHERE payment_id = ?").get(paymentId);
+        if (exists) return;
+
+        if (status === 'approved') {
+          // Marcar ticket como pagado y registrar payment_id
+          db.prepare(`
+            UPDATE tickets 
+            SET status = 'paid', paid_at = CURRENT_TIMESTAMP, locked_at = NULL, mp_payment_id = ? 
+            WHERE id = ?
+          `).run(paymentId, ticket.id);
+          console.log('[MP Webhook] Payment approved and ticket updated', { paymentId, ticketId: ticket.id });
+        } else if (status === 'rejected' || status === 'cancelled') {
+          // Liberar ticket si fue rechazado o cancelado (solo si estaba en processing)
+          db.prepare(`
+            UPDATE tickets 
+            SET status = 'available', participant_name = NULL, participant_whatsapp = NULL, locked_at = NULL, mp_payment_id = ? 
+            WHERE id = ? AND status = 'processing'
+          `).run(paymentId, ticket.id);
+          console.log('[MP Webhook] Payment rejected/cancelled and ticket released', { paymentId, ticketId: ticket.id, status });
+        }
+
+        // Registrar en tabla de pagos procesados
+        db.prepare(`
+          INSERT INTO processed_mp_payments (payment_id, ticket_id, status) 
+          VALUES (?, ?, ?)
+        `).run(paymentId, ticket.id, status);
+      })();
+
+    } catch (error) {
+      console.error('[MP Webhook] Unexpected Error:', error);
     }
     
     res.sendStatus(200);
