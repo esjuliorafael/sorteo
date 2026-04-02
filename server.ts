@@ -9,6 +9,7 @@ import jwt from "jsonwebtoken";
 import fs from "fs"; // added for migration logic
 import crypto from "crypto";
 import { rateLimit } from "express-rate-limit";
+import { validateMPSignature } from "./src/lib/mp-signature.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1140,6 +1141,22 @@ async function startServer() {
   });
 
   app.post("/api/mp/webhook", async (req, res) => {
+    // 1. Validar firma (si el secreto está configurado)
+    const webhookSecret = process.env.MP_WEBHOOK_SECRET;
+    if (webhookSecret) {
+      if (!validateMPSignature(req, webhookSecret)) {
+        const xSignature = (req.headers['x-signature'] as string) || '';
+        console.warn('[MP Webhook] Firma inválida detectada', {
+          ip: req.ip,
+          timestamp: new Date().toISOString(),
+          signature: xSignature.substring(0, 20) + '...'
+        });
+        return res.sendStatus(400);
+      }
+    } else {
+      console.warn('[MP Webhook] Firma no validada — configura MP_WEBHOOK_SECRET para mayor seguridad');
+    }
+
     const paymentId = req.body.data?.id || req.query.id;
     const action = req.body.action || req.query.topic; // Handle both formats
     
