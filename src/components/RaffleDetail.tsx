@@ -39,6 +39,8 @@ export default function RaffleDetail({ raffleId, user, onBack }: RaffleDetailPro
   const [isReserveModalOpen, setIsReserveModalOpen] = useState(false);
   const [reserveForm, setReserveForm] = useState({ name: "", whatsapp: "" });
   
+  const [copied, setCopied] = useState(false);
+  
   const ticketRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -128,6 +130,14 @@ export default function RaffleDetail({ raffleId, user, onBack }: RaffleDetailPro
     }
   };
 
+  const handleShare = () => {
+    if (!user?.business_slug || !raffle) return;
+    const url = `${window.location.origin}/${user.business_slug}/${raffle.short_id}`;
+    navigator.clipboard.writeText(url);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   if (loading || !raffle) {
     return <div className="animate-pulse space-y-8">
       <div className="h-10 w-32 bg-gray-200 rounded-xl" />
@@ -183,6 +193,30 @@ export default function RaffleDetail({ raffleId, user, onBack }: RaffleDetailPro
                 <p className="text-[10px] uppercase tracking-widest font-bold text-gray-400">Tipo</p>
                 <p className="text-xl font-bold capitalize">{raffle.type}</p>
               </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-4 mt-6">
+              {user?.business_slug ? (
+                <button 
+                  onClick={handleShare}
+                  className="flex items-center space-x-2 px-6 py-3 bg-black text-white rounded-2xl font-bold text-sm hover:bg-gray-900 transition-all shadow-lg shadow-black/10"
+                >
+                  <Share2 size={16} />
+                  <span>{copied ? "¡Copiado!" : "Compartir link público"}</span>
+                </button>
+              ) : (
+                <div className="group relative inline-block">
+                  <button 
+                    disabled
+                    className="flex items-center space-x-2 px-6 py-3 bg-gray-100 text-gray-400 rounded-2xl font-bold text-sm cursor-not-allowed"
+                  >
+                    <Share2 size={16} />
+                    <span>Compartir link público</span>
+                  </button>
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-black text-white text-[10px] font-bold rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
+                    Configura tu slug en Ajustes primero
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

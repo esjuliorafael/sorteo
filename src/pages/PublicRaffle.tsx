@@ -373,7 +373,7 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                   </div>
                   
                   <div className="space-y-3 pt-4">
-                    {(data.user as any).mp_enabled && (
+                    {(data.user as any).mp_enabled ? (
                       <button 
                         type="button"
                         onClick={handleCheckout}
@@ -389,16 +389,16 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                           </>
                         )}
                       </button>
+                    ) : (
+                      <button 
+                        type="button"
+                        onClick={handleReserve}
+                        disabled={reserving || checkoutLoading || !reserveForm.name || !reserveForm.whatsapp}
+                        className="w-full py-5 bg-black text-white rounded-3xl font-bold hover:bg-gray-800 transition-all shadow-xl shadow-black/10 disabled:opacity-50"
+                      >
+                        {reserving ? "Apartando..." : "Apartar boleto"}
+                      </button>
                     )}
-                    
-                    <button 
-                      type="button"
-                      onClick={handleReserve}
-                      disabled={reserving || checkoutLoading || !reserveForm.name || !reserveForm.whatsapp}
-                      className="w-full py-5 bg-black text-white rounded-3xl font-bold hover:bg-gray-800 transition-all shadow-xl shadow-black/10 disabled:opacity-50"
-                    >
-                      {reserving ? "Apartando..." : "Apartar (pago posterior)"}
-                    </button>
 
                     <button 
                       type="button"
