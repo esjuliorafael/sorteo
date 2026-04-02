@@ -248,6 +248,15 @@ async function startServer() {
     validate: { xForwardedForHeader: false, forwardedHeader: false },
   });
 
+  const paymentStatusLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 20,
+    message: { error: "Demasiadas consultas de estado de pago." },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, forwardedHeader: false },
+  });
+
   // Helper: Generate Short ID
   const generateShortId = (length = 6) => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -899,6 +908,48 @@ async function startServer() {
     res.json({ user, raffles });
   });
 
+  app.get("/api/public/payment-status", paymentStatusLimiter, (req, res) => {
+    const { payment_id, ticket_id } = req.query;
+    if (!ticket_id) return res.status(400).json({ error: "ticket_id es requerido" });
+
+    // 1. Check processed_mp_payments
+    if (payment_id) {
+      const processed = db.prepare("SELECT * FROM processed_mp_payments WHERE payment_id = ?").get(payment_id) as any;
+      if (processed) {
+        const ticket = db.prepare("SELECT number, participant_name FROM tickets WHERE id = ?").get(processed.ticket_id) as any;
+        return res.json({ 
+          status: processed.status === 'approved' ? 'approved' : 'rejected',
+          ticket_number: ticket?.number,
+          participant_name: ticket?.participant_name
+        });
+      }
+    }
+
+    // 2. Check ticket status directly
+    const ticket = db.prepare("SELECT number, participant_name, status FROM tickets WHERE id = ?").get(ticket_id) as any;
+    if (!ticket) return res.status(404).json({ error: "Ticket no encontrado" });
+
+    if (ticket.status === 'paid') {
+      return res.json({ 
+        status: 'approved',
+        ticket_number: ticket.number,
+        participant_name: ticket.participant_name
+      });
+    } else if (ticket.status === 'processing') {
+      return res.json({ 
+        status: 'pending_webhook',
+        ticket_number: ticket.number,
+        participant_name: ticket.participant_name
+      });
+    } else {
+      return res.json({ 
+        status: 'rejected',
+        ticket_number: ticket.number,
+        participant_name: ticket.participant_name
+      });
+    }
+  });
+
   app.get("/api/public/:slug/:shortId", (req, res) => {
     const user = db.prepare("SELECT id, business_name, business_slug, phone, bank_name, bank_clabe, bank_account_holder, bank_alias, mp_checkout_enabled FROM users WHERE business_slug = ?").get(req.params.slug) as any;
     if (!user) return res.status(404).json({ error: "Rifero no encontrado" });
@@ -1096,7 +1147,8 @@ async function startServer() {
       console.log('[MP Webhook] Processing payment', { paymentId, ticketId: ref.ticket_id, status });
 
       // Si el status es pending o in_process, no hacemos nada
-      if (status === 'pending' || status === 'in_process') {
+      const isUpdate = action === 'payment.updated'; // FIX
+      if ((status === 'pending' || status === 'in_process') && !isUpdate) { // FIX
         return res.sendStatus(200);
       }
 
@@ -1111,7 +1163,7 @@ async function startServer() {
           db.prepare(`
             UPDATE tickets 
             SET status = 'paid', paid_at = CURRENT_TIMESTAMP, locked_at = NULL, mp_payment_id = ? 
-            WHERE id = ?
+            WHERE id = ? AND status IN ('processing', 'reserved') -- FIX
           `).run(paymentId, ref.ticket_id);
           console.log('[MP Webhook] Payment approved and ticket updated', { paymentId, ticketId: ref.ticket_id });
         } else if (status === 'rejected' || status === 'cancelled') {

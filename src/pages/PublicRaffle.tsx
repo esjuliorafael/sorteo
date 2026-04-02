@@ -11,7 +11,10 @@ import {
   MessageCircle,
   ShieldCheck,
   Zap,
-  Globe
+  Globe,
+  ChevronDown,
+  ChevronUp,
+  Loader2
 } from "lucide-react";
 import { format } from "date-fns";
 import { es } from "date-fns/locale";
@@ -34,8 +37,15 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
   const [reserving, setReserving] = useState(false);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState<"success" | "pending" | "error" | null>(null);
+  const [verifyingPayment, setVerifyingPayment] = useState(false);
+  const [paymentDetails, setPaymentDetails] = useState<any>(null);
+  const [showOxxoInstructions, setShowOxxoInstructions] = useState(false);
 
   useEffect(() => {
+    let pollingInterval: NodeJS.Timeout;
+    let pollingCount = 0;
+    const MAX_POLLING_ATTEMPTS = 5;
+
     const init = async () => {
       const raffleData = await fetchRaffle();
       
@@ -43,11 +53,15 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
       const urlParams = new URLSearchParams(window.location.search);
       const paid = urlParams.get("paid");
       const ticketId = urlParams.get("ticket_id");
+      const paymentId = urlParams.get("payment_id");
+      const mpStatus = urlParams.get("status");
+      const paymentType = urlParams.get("payment_type");
 
       if (paid && raffleData) {
-        if (paid === "true") setPaymentStatus("success");
-        else if (paid === "pending") setPaymentStatus("pending");
-        else if (paid === "false") setPaymentStatus("error");
+        setVerifyingPayment(true);
+        
+        // Initial wait for 2 seconds to avoid anxiety
+        await new Promise(r => setTimeout(r, 2000));
 
         if (ticketId) {
           const ticket = raffleData.raffle.tickets?.find((t: any) => t.id === parseInt(ticketId));
@@ -59,6 +73,63 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
             });
           }
         }
+
+        const verifyStatus = async () => {
+          try {
+            const statusData = await api.get(`/public/payment-status?payment_id=${paymentId || ""}&ticket_id=${ticketId || ""}`);
+            
+            if (statusData.status === 'approved') {
+              setPaymentStatus("success");
+              setPaymentDetails({
+                ...statusData,
+                payment_type: paymentType,
+                date: Date.now()
+              });
+              setVerifyingPayment(false);
+              fetchRaffle(); // Refresh map
+              return true;
+            } else if (statusData.status === 'rejected') {
+              setPaymentStatus("error");
+              setPaymentDetails({ mp_status: mpStatus });
+              setVerifyingPayment(false);
+              fetchRaffle(); // Refresh map (ticket released)
+              return true;
+            } else if (statusData.status === 'pending_webhook') {
+              // Keep polling
+              return false;
+            }
+            return false;
+          } catch (err) {
+            console.error("Error verifying payment:", err);
+            return false;
+          }
+        };
+
+        if (paid === "true") {
+          const confirmed = await verifyStatus();
+          if (!confirmed) {
+            pollingInterval = setInterval(async () => {
+              pollingCount++;
+              const done = await verifyStatus();
+              if (done || pollingCount >= MAX_POLLING_ATTEMPTS) {
+                clearInterval(pollingInterval);
+                if (!done) {
+                  setPaymentStatus("pending");
+                  setVerifyingPayment(false);
+                }
+              }
+            }, 3000);
+          }
+        } else if (paid === "pending") {
+          setPaymentStatus("pending");
+          setVerifyingPayment(false);
+        } else if (paid === "false") {
+          setPaymentStatus("error");
+          setPaymentDetails({ mp_status: mpStatus });
+          setVerifyingPayment(false);
+          fetchRaffle(); // Refresh map
+        }
+
         setIsReserveModalOpen(true);
         
         // Clean URL
@@ -67,7 +138,24 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
     };
     
     init();
+
+    return () => {
+      if (pollingInterval) clearInterval(pollingInterval);
+    };
   }, [slug, shortId]);
+
+  const getPaymentTypeLabel = (type: string) => {
+    const types: Record<string, string> = {
+      'credit_card': 'Tarjeta de Crédito',
+      'debit_card': 'Tarjeta de Débito',
+      'account_money': 'Dinero en cuenta Mercado Pago',
+      'ticket': 'Efectivo (OXXO/7-Eleven)',
+      'bank_transfer': 'Transferencia Bancaria',
+      'atm': 'Cajero Automático',
+      'prepaid_card': 'Tarjeta Prepago'
+    };
+    return types[type] || 'Otro método';
+  };
 
   const fetchRaffle = async () => {
     try {
@@ -290,7 +378,19 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
       {isReserveModalOpen && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-md rounded-[3rem] p-10 shadow-2xl animate-in zoom-in duration-300">
-            {paymentStatus === "success" ? (
+            {verifyingPayment ? (
+              <div className="text-center space-y-8 py-10">
+                <div className="w-20 h-20 bg-black/5 text-black rounded-full flex items-center justify-center mx-auto">
+                  <Loader2 size={40} className="animate-spin" />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-3xl font-black tracking-tighter">Verificando Pago</h3>
+                  <p className="text-gray-500 font-medium leading-relaxed">
+                    Estamos confirmando tu transacción con Mercado Pago. Esto tomará solo unos segundos...
+                  </p>
+                </div>
+              </div>
+            ) : paymentStatus === "success" ? (
               <div className="text-center space-y-8">
                 <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto">
                   <CheckCircle2 size={40} />
@@ -301,6 +401,27 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                     ¡Felicidades {reserveForm.name}! Tu boleto <span className="text-black font-bold">#{reservationSuccess?.number}</span> ha sido confirmado.
                   </p>
                 </div>
+
+                {paymentDetails && (
+                  <div className="bg-gray-50 p-6 rounded-3xl text-left space-y-3 border border-gray-100">
+                    <p className="text-[10px] uppercase tracking-widest font-bold text-gray-400">Resumen del pago</p>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <p className="text-[10px] text-gray-400 font-bold uppercase">Boleto</p>
+                        <p className="text-sm font-bold">#{paymentDetails.ticket_number}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-gray-400 font-bold uppercase">Método</p>
+                        <p className="text-sm font-bold">{getPaymentTypeLabel(paymentDetails.payment_type)}</p>
+                      </div>
+                      <div className="col-span-2">
+                        <p className="text-[10px] text-gray-400 font-bold uppercase">Fecha</p>
+                        <p className="text-sm font-bold">{format(paymentDetails.date, "d 'de' MMMM, HH:mm 'hrs'", { locale: es })}</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-4">
                   <button 
                     onClick={() => alert("Funcionalidad de descarga en desarrollo")}
@@ -323,6 +444,7 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                       setIsReserveModalOpen(false);
                       setPaymentStatus(null);
                       setReservationSuccess(null);
+                      setPaymentDetails(null);
                     }}
                     className="w-full py-5 text-gray-400 font-bold hover:text-black transition-colors"
                   >
@@ -338,9 +460,44 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                 <div className="space-y-2">
                   <h3 className="text-3xl font-black tracking-tighter">Pago en Proceso</h3>
                   <p className="text-gray-500 font-medium leading-relaxed">
-                    Tu pago está siendo procesado por Mercado Pago. Recibirás una confirmación en cuanto se acredite.
+                    {paymentDetails?.payment_type === 'ticket' 
+                      ? "Elegiste pagar en efectivo. Tu boleto permanece apartado por 72 horas. Realiza el pago antes de que expire."
+                      : "Tu pago está siendo procesado por Mercado Pago. Recibirás una confirmación en cuanto se acredite."}
                   </p>
                 </div>
+
+                {paymentDetails?.payment_type === 'ticket' && (
+                  <div className="text-left border border-orange-100 rounded-3xl overflow-hidden">
+                    <button 
+                      onClick={() => setShowOxxoInstructions(!showOxxoInstructions)}
+                      className="w-full p-6 bg-orange-50 flex items-center justify-between hover:bg-orange-100 transition-colors"
+                    >
+                      <span className="text-sm font-bold text-orange-800">¿Cómo pago en OXXO?</span>
+                      {showOxxoInstructions ? <ChevronUp size={18} className="text-orange-800" /> : <ChevronDown size={18} className="text-orange-800" />}
+                    </button>
+                    {showOxxoInstructions && (
+                      <div className="p-6 bg-white space-y-4 animate-in slide-in-from-top-2 duration-300">
+                        <div className="flex space-x-3">
+                          <div className="w-5 h-5 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">1</div>
+                          <p className="text-xs text-gray-600">Lleva tu comprobante (digital o impreso) a cualquier tienda OXXO.</p>
+                        </div>
+                        <div className="flex space-x-3">
+                          <div className="w-5 h-5 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">2</div>
+                          <p className="text-xs text-gray-600">Indica al cajero que realizarás un pago de servicio de Mercado Pago.</p>
+                        </div>
+                        <div className="flex space-x-3">
+                          <div className="w-5 h-5 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">3</div>
+                          <p className="text-xs text-gray-600">Escanea el código o dicta el número de referencia.</p>
+                        </div>
+                        <div className="flex space-x-3">
+                          <div className="w-5 h-5 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">4</div>
+                          <p className="text-xs text-gray-600">¡Listo! Tu boleto se marcará como pagado automáticamente en unos minutos.</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="bg-orange-50 p-6 rounded-3xl text-left">
                   <p className="text-sm font-medium text-orange-800 leading-relaxed">
                     Tu boleto #{reservationSuccess?.number} permanecerá apartado hasta que se confirme el pago.
@@ -351,6 +508,8 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                     setIsReserveModalOpen(false);
                     setPaymentStatus(null);
                     setReservationSuccess(null);
+                    setPaymentDetails(null);
+                    setShowOxxoInstructions(false);
                   }}
                   className="w-full py-5 bg-black text-white rounded-3xl font-bold"
                 >
@@ -363,9 +522,13 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                   <Clock size={40} />
                 </div>
                 <div className="space-y-2">
-                  <h3 className="text-3xl font-black tracking-tighter">Pago No Procesado</h3>
+                  <h3 className="text-3xl font-black tracking-tighter">
+                    {paymentDetails?.mp_status === 'rejected' ? "Pago Rechazado" : "Pago No Procesado"}
+                  </h3>
                   <p className="text-gray-500 font-medium leading-relaxed">
-                    No se pudo completar el pago. Tu boleto fue liberado y está disponible nuevamente para otros participantes.
+                    {paymentDetails?.mp_status === 'rejected' 
+                      ? "Tu pago fue rechazado por el banco. Intenta con otra tarjeta o usa una cuenta de Mercado Pago."
+                      : "No se pudo completar el pago. Tu boleto fue liberado y está disponible nuevamente para otros participantes."}
                   </p>
                 </div>
                 <button 
@@ -373,6 +536,7 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                     setIsReserveModalOpen(false);
                     setPaymentStatus(null);
                     setReservationSuccess(null);
+                    setPaymentDetails(null);
                     fetchRaffle(); // Refresh to show the released ticket
                   }}
                   className="w-full py-5 bg-black text-white rounded-3xl font-bold"
