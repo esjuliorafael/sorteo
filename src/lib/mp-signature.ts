@@ -3,6 +3,17 @@ import { Request } from 'express';
 
 /**
  * Validates the Mercado Pago webhook signature.
+ * 
+ * Mercado Pago Implementation Details:
+ * - MP signs a combination of 'data.id' (from query params), 'x-request-id' (header), and 'ts' (header).
+ * - IMPORTANT: MP does NOT sign the raw body in its current implementation (as of 2024).
+ * - Therefore, express.json() processing the body before this validation does NOT affect the result.
+ * - If MP adds body signing in the future, you must capture the rawBody using a verify callback in express.json:
+ * 
+ *   app.use(express.json({ 
+ *     verify: (req, res, buf) => { (req as any).rawBody = buf; } 
+ *   }));
+ * 
  * Documentation: https://www.mercadopago.com.mx/developers/es/docs/checkout-pro/additional-content/your-integrations/notifications/webhooks
  */
 export function validateMPSignature(req: Request, secret: string): boolean {
@@ -30,8 +41,11 @@ export function validateMPSignature(req: Request, secret: string): boolean {
   }
 
   // 2. Validate timestamp tolerance (5 minutes)
-  const timestamp = Number(ts);
-  if (isNaN(timestamp) || Math.abs(Date.now() - timestamp) > 300000) {
+  // Mercado Pago may send 'ts' in seconds (10 digits) or milliseconds (13 digits).
+  // We detect the unit by length to ensure correct comparison with Date.now() (ms).
+  const tsMs = ts.length <= 10 ? Number(ts) * 1000 : Number(ts);
+  
+  if (isNaN(tsMs) || Math.abs(Date.now() - tsMs) > 300000) {
     return false;
   }
 
@@ -40,7 +54,7 @@ export function validateMPSignature(req: Request, secret: string): boolean {
 
   // 4. Build the template
   // id:{dataId};request-id:{xRequestId};ts:{ts};
-  // Omit any field that is not present in the notification
+  // IMPORTANT: Use the ORIGINAL 'ts' string from the header as MP used it for signing.
   let manifest = "";
   if (dataId) manifest += `id:${dataId};`;
   if (xRequestId) manifest += `request-id:${xRequestId};`;

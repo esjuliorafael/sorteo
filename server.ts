@@ -265,6 +265,15 @@ async function startServer() {
     validate: { xForwardedForHeader: false, forwardedHeader: false },
   });
 
+  const webhookLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 100, // Mercado Pago can send high bursts of notifications during massive payment events
+    message: { error: "Demasiadas solicitudes al webhook" },
+    validate: { xForwardedForHeader: false, forwardedHeader: false },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
   // Helper: Generate Short ID
   const generateShortId = (length = 6) => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -1140,7 +1149,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/mp/webhook", async (req, res) => {
+  app.post("/api/mp/webhook", webhookLimiter, async (req, res) => {
     // 1. Validar firma (si el secreto está configurado)
     const webhookSecret = process.env.MP_WEBHOOK_SECRET;
     if (webhookSecret) {
@@ -1154,7 +1163,9 @@ async function startServer() {
         return res.sendStatus(400);
       }
     } else {
-      console.warn('[MP Webhook] Firma no validada — configura MP_WEBHOOK_SECRET para mayor seguridad');
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('⚠️ [MP Webhook] Firma no validada — configura MP_WEBHOOK_SECRET para mayor seguridad');
+      }
     }
 
     const paymentId = req.body.data?.id || req.query.id;
