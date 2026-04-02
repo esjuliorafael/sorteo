@@ -14,7 +14,9 @@ import {
   Globe,
   ChevronDown,
   ChevronUp,
-  Loader2
+  Loader2,
+  XCircle, // BUG FIX 3
+  Download // BUG FIX 4
 } from "lucide-react";
 import { format } from "date-fns";
 import { es } from "date-fns/locale";
@@ -42,12 +44,14 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
   const [showOxxoInstructions, setShowOxxoInstructions] = useState(false);
 
   useEffect(() => {
-    let pollingInterval: NodeJS.Timeout;
+    let isMounted = true; // BUG FIX 1
+    let pollingInterval: ReturnType<typeof setInterval> | null = null; // BUG FIX 1
     let pollingCount = 0;
     const MAX_POLLING_ATTEMPTS = 5;
 
     const init = async () => {
       const raffleData = await fetchRaffle();
+      if (!isMounted) return; // BUG FIX 1
       
       // Check for payment status in URL
       const urlParams = new URLSearchParams(window.location.search);
@@ -58,40 +62,48 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
       const paymentType = urlParams.get("payment_type");
 
       if (paid && raffleData) {
-        setVerifyingPayment(true);
+        if (isMounted) setVerifyingPayment(true); // BUG FIX 1
         
         // Initial wait for 2 seconds to avoid anxiety
         await new Promise(r => setTimeout(r, 2000));
+        if (!isMounted) return; // BUG FIX 1
 
         if (ticketId) {
           const ticket = raffleData.raffle.tickets?.find((t: any) => t.id === parseInt(ticketId));
           if (ticket) {
-            setReservationSuccess(ticket);
-            setReserveForm({
-              name: ticket.participant_name || "",
-              whatsapp: ticket.participant_whatsapp || ""
-            });
+            if (isMounted) { // BUG FIX 1
+              setReservationSuccess(ticket);
+              setReserveForm({
+                name: ticket.participant_name || "",
+                whatsapp: ticket.participant_whatsapp || ""
+              });
+            }
           }
         }
 
         const verifyStatus = async () => {
+          if (!isMounted) return true; // BUG FIX 1
           try {
             const statusData = await api.get(`/public/payment-status?payment_id=${paymentId || ""}&ticket_id=${ticketId || ""}`);
             
             if (statusData.status === 'approved') {
-              setPaymentStatus("success");
-              setPaymentDetails({
-                ...statusData,
-                payment_type: paymentType,
-                date: Date.now()
-              });
-              setVerifyingPayment(false);
+              if (isMounted) { // BUG FIX 1
+                setPaymentStatus("success");
+                setPaymentDetails({
+                  ...statusData,
+                  payment_type: statusData.payment_type ?? paymentType, // BUG FIX 2: statusData tiene prioridad
+                  date: statusData.paid_at ? new Date(statusData.paid_at).getTime() : Date.now() // BUG FIX 2
+                });
+                setVerifyingPayment(false);
+              }
               fetchRaffle(); // Refresh map
               return true;
             } else if (statusData.status === 'rejected') {
-              setPaymentStatus("error");
-              setPaymentDetails({ mp_status: mpStatus });
-              setVerifyingPayment(false);
+              if (isMounted) { // BUG FIX 1
+                setPaymentStatus("error");
+                setPaymentDetails({ mp_status: mpStatus });
+                setVerifyingPayment(false);
+              }
               fetchRaffle(); // Refresh map (ticket released)
               return true;
             } else if (statusData.status === 'pending_webhook') {
@@ -107,13 +119,13 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
 
         if (paid === "true") {
           const confirmed = await verifyStatus();
-          if (!confirmed) {
+          if (!confirmed && isMounted) { // BUG FIX 1
             pollingInterval = setInterval(async () => {
               pollingCount++;
               const done = await verifyStatus();
               if (done || pollingCount >= MAX_POLLING_ATTEMPTS) {
-                clearInterval(pollingInterval);
-                if (!done) {
+                if (pollingInterval) clearInterval(pollingInterval);
+                if (!done && isMounted) { // BUG FIX 1
                   setPaymentStatus("pending");
                   setVerifyingPayment(false);
                 }
@@ -121,16 +133,20 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
             }, 3000);
           }
         } else if (paid === "pending") {
-          setPaymentStatus("pending");
-          setVerifyingPayment(false);
+          if (isMounted) { // BUG FIX 1
+            setPaymentStatus("pending");
+            setVerifyingPayment(false);
+          }
         } else if (paid === "false") {
-          setPaymentStatus("error");
-          setPaymentDetails({ mp_status: mpStatus });
-          setVerifyingPayment(false);
+          if (isMounted) { // BUG FIX 1
+            setPaymentStatus("error");
+            setPaymentDetails({ mp_status: mpStatus });
+            setVerifyingPayment(false);
+          }
           fetchRaffle(); // Refresh map
         }
 
-        setIsReserveModalOpen(true);
+        if (isMounted) setIsReserveModalOpen(true); // BUG FIX 1
         
         // Clean URL
         window.history.replaceState({}, document.title, window.location.pathname);
@@ -140,7 +156,8 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
     init();
 
     return () => {
-      if (pollingInterval) clearInterval(pollingInterval);
+      isMounted = false; // BUG FIX 1
+      if (pollingInterval) clearInterval(pollingInterval); // BUG FIX 1
     };
   }, [slug, shortId]);
 
@@ -427,7 +444,7 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                     onClick={() => alert("Funcionalidad de descarga en desarrollo")}
                     className="w-full py-5 bg-black text-white rounded-3xl font-bold flex items-center justify-center space-x-3 hover:bg-gray-800 transition-all shadow-xl shadow-black/10"
                   >
-                    <Globe size={20} />
+                    <Download size={20} /> {/* BUG FIX 4 */}
                     <span>Descargar Ticket Digital</span>
                   </button>
                   <a 
@@ -460,13 +477,13 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                 <div className="space-y-2">
                   <h3 className="text-3xl font-black tracking-tighter">Pago en Proceso</h3>
                   <p className="text-gray-500 font-medium leading-relaxed">
-                    {paymentDetails?.payment_type === 'ticket' 
+                    {['ticket', 'atm', 'bank_transfer'].includes(paymentDetails?.payment_type ?? '') // BUG FIX 2
                       ? "Elegiste pagar en efectivo. Tu boleto permanece apartado por 72 horas. Realiza el pago antes de que expire."
                       : "Tu pago está siendo procesado por Mercado Pago. Recibirás una confirmación en cuanto se acredite."}
                   </p>
                 </div>
 
-                {paymentDetails?.payment_type === 'ticket' && (
+                {['ticket', 'atm', 'bank_transfer'].includes(paymentDetails?.payment_type ?? '') && ( // BUG FIX 2
                   <div className="text-left border border-orange-100 rounded-3xl overflow-hidden">
                     <button 
                       onClick={() => setShowOxxoInstructions(!showOxxoInstructions)}
@@ -519,7 +536,7 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
             ) : paymentStatus === "error" ? (
               <div className="text-center space-y-8">
                 <div className="w-20 h-20 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto">
-                  <Clock size={40} />
+                  <XCircle size={40} /> {/* BUG FIX 3 */}
                 </div>
                 <div className="space-y-2">
                   <h3 className="text-3xl font-black tracking-tighter">

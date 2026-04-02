@@ -155,6 +155,13 @@ db.exec(`
   );
 `);
 
+// BUG FIX 2: Ensure payment_type_id exists
+try {
+  db.exec("ALTER TABLE processed_mp_payments ADD COLUMN payment_type_id TEXT;");
+} catch (e) {
+  // Column already exists or table doesn't exist yet
+}
+
 // Insert test promo codes
 const testCodes = [
   { code: 'SORTEO2026', type: 'discount_percent', value: 30, applicable_plans: 'all', description: '30% OFF en cualquier plan' },
@@ -909,24 +916,64 @@ async function startServer() {
   });
 
   app.get("/api/public/payment-status", paymentStatusLimiter, (req, res) => {
-    const { payment_id, ticket_id } = req.query;
-    if (!ticket_id) return res.status(400).json({ error: "ticket_id es requerido" });
+    const rawPaymentId = req.query.payment_id as string; // BUG FIX 5
+    const ticketId = req.query.ticket_id as string;
+
+    // BUG FIX 5: Normalizar payment_id vacío a null
+    const paymentId = rawPaymentId && rawPaymentId.trim() !== "" 
+      ? rawPaymentId.trim() 
+      : null;
+
+    if (!paymentId && !ticketId) {
+      return res.status(400).json({ error: "Se requiere payment_id o ticket_id" });
+    }
 
     // 1. Check processed_mp_payments
-    if (payment_id) {
-      const processed = db.prepare("SELECT * FROM processed_mp_payments WHERE payment_id = ?").get(payment_id) as any;
+    if (paymentId) {
+      // BUG FIX 2: Incluir payment_type_id y paid_at
+      const processed = db.prepare(`
+        SELECT status, payment_type_id, processed_at as paid_at, mp_payment_id, ticket_id
+        FROM processed_mp_payments 
+        WHERE payment_id = ?
+      `).get(paymentId) as any;
+
       if (processed) {
         const ticket = db.prepare("SELECT number, participant_name FROM tickets WHERE id = ?").get(processed.ticket_id) as any;
         return res.json({ 
           status: processed.status === 'approved' ? 'approved' : 'rejected',
+          payment_type: processed.payment_type_id, // BUG FIX 2
+          paid_at: processed.paid_at, // BUG FIX 2
+          mp_payment_id: processed.mp_payment_id,
           ticket_number: ticket?.number,
           participant_name: ticket?.participant_name
         });
       }
     }
 
-    // 2. Check ticket status directly
-    const ticket = db.prepare("SELECT number, participant_name, status FROM tickets WHERE id = ?").get(ticket_id) as any;
+    // FALLBACK: Check by ticket_id if paymentId is null or not found
+    if (ticketId) {
+      const processedByTicket = db.prepare(`
+        SELECT status, payment_type_id, processed_at as paid_at, mp_payment_id
+        FROM processed_mp_payments 
+        WHERE ticket_id = ?
+        ORDER BY processed_at DESC LIMIT 1
+      `).get(ticketId) as any;
+
+      if (processedByTicket) {
+        const ticket = db.prepare("SELECT number, participant_name FROM tickets WHERE id = ?").get(ticketId) as any;
+        return res.json({ 
+          status: processedByTicket.status === 'approved' ? 'approved' : 'rejected',
+          payment_type: processedByTicket.payment_type_id, // BUG FIX 2
+          paid_at: processedByTicket.paid_at, // BUG FIX 2
+          mp_payment_id: processedByTicket.mp_payment_id,
+          ticket_number: ticket?.number,
+          participant_name: ticket?.participant_name
+        });
+      }
+    }
+
+    // 2. Check ticket status directly (for pending/processing)
+    const ticket = db.prepare("SELECT number, participant_name, status FROM tickets WHERE id = ?").get(ticketId) as any;
     if (!ticket) return res.status(404).json({ error: "Ticket no encontrado" });
 
     if (ticket.status === 'paid') {
@@ -1178,9 +1225,9 @@ async function startServer() {
 
         // Registrar en tabla de pagos procesados
         db.prepare(`
-          INSERT INTO processed_mp_payments (payment_id, ticket_id, status) 
-          VALUES (?, ?, ?)
-        `).run(paymentId, ref.ticket_id, status);
+          INSERT INTO processed_mp_payments (payment_id, ticket_id, status, payment_type_id) -- BUG FIX 2
+          VALUES (?, ?, ?, ?) -- BUG FIX 2
+        `).run(paymentId, ref.ticket_id, status, payment.payment_type_id); // BUG FIX 2
       })();
 
     } catch (error) {
