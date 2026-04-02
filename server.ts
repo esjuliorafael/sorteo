@@ -1005,9 +1005,9 @@ async function startServer() {
             name: participant_name,
           },
           back_urls: {
-            success: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=true`,
-            failure: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=false`,
-            pending: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=pending`,
+            success: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=true&ticket_id=${ticket.id}`,
+            failure: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=false&ticket_id=${ticket.id}`,
+            pending: `${APP_URL}/${user.business_slug}/${req.params.shortId}?paid=pending&ticket_id=${ticket.id}`,
           },
           auto_return: "approved",
           notification_url: `${APP_URL}/api/mp/webhook`,

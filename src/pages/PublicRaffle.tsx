@@ -36,29 +36,47 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
   const [paymentStatus, setPaymentStatus] = useState<"success" | "pending" | "error" | null>(null);
 
   useEffect(() => {
-    fetchRaffle();
+    const init = async () => {
+      const raffleData = await fetchRaffle();
+      
+      // Check for payment status in URL
+      const urlParams = new URLSearchParams(window.location.search);
+      const paid = urlParams.get("paid");
+      const ticketId = urlParams.get("ticket_id");
+
+      if (paid && raffleData) {
+        if (paid === "true") setPaymentStatus("success");
+        else if (paid === "pending") setPaymentStatus("pending");
+        else if (paid === "false") setPaymentStatus("error");
+
+        if (ticketId) {
+          const ticket = raffleData.raffle.tickets?.find((t: any) => t.id === parseInt(ticketId));
+          if (ticket) {
+            setReservationSuccess(ticket);
+            setReserveForm({
+              name: ticket.participant_name || "",
+              whatsapp: ticket.participant_whatsapp || ""
+            });
+          }
+        }
+        setIsReserveModalOpen(true);
+        
+        // Clean URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    };
     
-    // Check for payment status in URL
-    const urlParams = new URLSearchParams(window.location.search);
-    const paid = urlParams.get("paid");
-    if (paid === "true") {
-      setPaymentStatus("success");
-      setIsReserveModalOpen(true);
-    } else if (paid === "pending") {
-      setPaymentStatus("pending");
-      setIsReserveModalOpen(true);
-    } else if (paid === "false") {
-      setPaymentStatus("error");
-      setIsReserveModalOpen(true);
-    }
+    init();
   }, [slug, shortId]);
 
   const fetchRaffle = async () => {
     try {
       const result = await api.get(`/public/${slug}/${shortId}`);
       setData(result);
+      return result;
     } catch (err: any) {
       setError("Rifa no encontrada");
+      return null;
     } finally {
       setLoading(false);
     }
@@ -123,7 +141,13 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
     const phone = data.user.phone?.replace(/\D/g, "");
     if (!phone) return "";
 
-    const message = `¡Hola ${businessName}! Mi nombre es ${reserveForm.name}. Aparté el boleto #${reservationSuccess.number} para la rifa '${data.raffle.title}'. Total: $${data.raffle.ticket_price} ${data.raffle.currency}. ¡Quedo pendiente de los datos de pago!`;
+    let message = "";
+    if (paymentStatus === "success") {
+      message = `¡Hola ${businessName}! Mi nombre es ${reserveForm.name}. Confirmo que mi pago por el boleto #${reservationSuccess.number} para la rifa '${data.raffle.title}' fue procesado con éxito por Mercado Pago.`;
+    } else {
+      message = `¡Hola ${businessName}! Mi nombre es ${reserveForm.name}. Aparté el boleto #${reservationSuccess.number} para la rifa '${data.raffle.title}'. Total: $${data.raffle.ticket_price} ${data.raffle.currency}. ¡Quedo pendiente de los datos de pago!`;
+    }
+    
     return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
   };
 
@@ -272,12 +296,19 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                   <CheckCircle2 size={40} />
                 </div>
                 <div className="space-y-2">
-                  <h3 className="text-3xl font-black tracking-tighter">¡Pago Exitoso!</h3>
+                  <h3 className="text-3xl font-black tracking-tighter">¡Boleto Pagado! 🎉</h3>
                   <p className="text-gray-500 font-medium leading-relaxed">
-                    Tu pago ha sido procesado correctamente. ¡Ya tienes tu lugar asegurado!
+                    ¡Felicidades {reserveForm.name}! Tu boleto <span className="text-black font-bold">#{reservationSuccess?.number}</span> ha sido confirmado.
                   </p>
                 </div>
                 <div className="space-y-4">
+                  <button 
+                    onClick={() => alert("Funcionalidad de descarga en desarrollo")}
+                    className="w-full py-5 bg-black text-white rounded-3xl font-bold flex items-center justify-center space-x-3 hover:bg-gray-800 transition-all shadow-xl shadow-black/10"
+                  >
+                    <Globe size={20} />
+                    <span>Descargar Ticket Digital</span>
+                  </button>
                   <a 
                     href={buildWhatsAppUrl()}
                     target="_blank"
@@ -285,13 +316,13 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                     className="w-full py-5 bg-[#25D366] text-white rounded-3xl font-bold flex items-center justify-center space-x-3 hover:opacity-90 transition-all shadow-xl shadow-[#25D366]/20"
                   >
                     <MessageCircle size={20} />
-                    <span>Confirmar por WhatsApp</span>
+                    <span>Compartir por WhatsApp</span>
                   </a>
                   <button 
                     onClick={() => {
                       setIsReserveModalOpen(false);
                       setPaymentStatus(null);
-                      window.history.replaceState({}, document.title, window.location.pathname);
+                      setReservationSuccess(null);
                     }}
                     className="w-full py-5 text-gray-400 font-bold hover:text-black transition-colors"
                   >
@@ -305,16 +336,21 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                   <Clock size={40} />
                 </div>
                 <div className="space-y-2">
-                  <h3 className="text-3xl font-black tracking-tighter">Pago Pendiente</h3>
+                  <h3 className="text-3xl font-black tracking-tighter">Pago en Proceso</h3>
                   <p className="text-gray-500 font-medium leading-relaxed">
-                    Tu pago está siendo procesado. Te notificaremos en cuanto se confirme.
+                    Tu pago está siendo procesado por Mercado Pago. Recibirás una confirmación en cuanto se acredite.
+                  </p>
+                </div>
+                <div className="bg-orange-50 p-6 rounded-3xl text-left">
+                  <p className="text-sm font-medium text-orange-800 leading-relaxed">
+                    Tu boleto #{reservationSuccess?.number} permanecerá apartado hasta que se confirme el pago.
                   </p>
                 </div>
                 <button 
                   onClick={() => {
                     setIsReserveModalOpen(false);
                     setPaymentStatus(null);
-                    window.history.replaceState({}, document.title, window.location.pathname);
+                    setReservationSuccess(null);
                   }}
                   className="w-full py-5 bg-black text-white rounded-3xl font-bold"
                 >
@@ -327,20 +363,21 @@ export default function PublicRaffle({ slug, shortId }: PublicRaffleProps) {
                   <Clock size={40} />
                 </div>
                 <div className="space-y-2">
-                  <h3 className="text-3xl font-black tracking-tighter">Pago Cancelado</h3>
+                  <h3 className="text-3xl font-black tracking-tighter">Pago No Procesado</h3>
                   <p className="text-gray-500 font-medium leading-relaxed">
-                    No se pudo completar el pago. Inténtalo de nuevo o elige otro método.
+                    No se pudo completar el pago. Tu boleto fue liberado y está disponible nuevamente para otros participantes.
                   </p>
                 </div>
                 <button 
                   onClick={() => {
                     setIsReserveModalOpen(false);
                     setPaymentStatus(null);
-                    window.history.replaceState({}, document.title, window.location.pathname);
+                    setReservationSuccess(null);
+                    fetchRaffle(); // Refresh to show the released ticket
                   }}
                   className="w-full py-5 bg-black text-white rounded-3xl font-bold"
                 >
-                  Volver a intentar
+                  Intentar de nuevo
                 </button>
               </div>
             ) : !reservationSuccess ? (
