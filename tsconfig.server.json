@@ -1,0 +1,16 @@
+// TEMPORAL: Render deploy — eliminar después de pruebas
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist",
+    "rootDir": ".",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": false
+  },
+  "include": ["server.ts", "src/lib/**/*.ts"],
+  "exclude": ["src/components", "src/pages", "src/hooks", "src/App.tsx", "node_modules", "dist"]
+}

@@ -19,3 +19,13 @@ npm run dev
 ## Base de Datos
 
 El proyecto utiliza SQLite (`sorteo.db`). Si existe una base de datos anterior (`kouun.db`), se migrará automáticamente al iniciar el servidor.
+
+## Deploy en Render (TEMPORAL — eliminar después de pruebas)
+
+Script de build para Render: `npm run build:render`
+Start command para Render: `node dist/server.js`
+
+### Archivos temporales a eliminar post-pruebas:
+- `tsconfig.server.json`
+- `render.yaml`
+- Script `"build:render"` en package.json
