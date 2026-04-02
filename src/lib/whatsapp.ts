@@ -1,4 +1,4 @@
-import { Ticket, Raffle, User } from "../types";
+import { Ticket, Raffle, User } from "../types.js";
 
 /**
  * Builds a WhatsApp wa.me URL with a pre-formatted message based on ticket status.
