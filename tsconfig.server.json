@@ -4,7 +4,7 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "outDir": "dist",
+    "outDir": "dist-server",
     "rootDir": ".",
     "esModuleInterop": true,
     "resolveJsonModule": true,
@@ -12,5 +12,5 @@
     "strict": false
   },
   "include": ["server.ts", "src/lib/**/*.ts"],
-  "exclude": ["src/components", "src/pages", "src/hooks", "src/App.tsx", "node_modules", "dist"]
+  "exclude": ["src/components", "src/pages", "src/hooks", "src/App.tsx", "node_modules", "dist", "dist-server"]
 }
