@@ -11,7 +11,7 @@ import { Request } from 'express';
  * - If MP adds body signing in the future, you must capture the rawBody using a verify callback in express.json:
  * 
  *   app.use(express.json({ 
- *     verify: (req, res, buf) => { (req as any).rawBody = buf; } 
+ *     verify: (req, _res, buf, _encoding) => { (req as any).rawBody = buf; } 
  *   }));
  * 
  * Documentation: https://www.mercadopago.com.mx/developers/es/docs/checkout-pro/additional-content/your-integrations/notifications/webhooks
