@@ -1227,6 +1227,48 @@ async function startServer() {
     }
   });
 
+  /**
+   * Webhook para notificaciones de vinculación (OAuth).
+   * Registrar en: MP Developers -> Tu aplicación -> Webhooks -> Evento: Vinculación
+   * URL: ${APP_URL}/api/mp/connect-webhook
+   */
+  app.post("/api/mp/connect-webhook", webhookLimiter, async (req, res) => {
+    const webhookSecret = process.env.MP_WEBHOOK_SECRET;
+    if (webhookSecret) {
+      if (!validateMPSignature(req, webhookSecret)) {
+        console.warn('[MP Connect Webhook] Firma inválida detectada');
+        return res.sendStatus(400);
+      }
+    } else if (process.env.NODE_ENV !== 'production') {
+      console.warn('⚠️ [MP Connect Webhook] Firma no validada — configura MP_WEBHOOK_SECRET');
+    }
+
+    const { type, action, data } = req.body;
+
+    if (type === "mp-connect" && action === "application.deauthorized") {
+      const mpUserId = data?.user_id;
+      if (!mpUserId) return res.sendStatus(200);
+
+      try {
+        const creds = db.prepare("SELECT user_id FROM mp_credentials WHERE mp_user_id = ?").get(mpUserId) as any;
+        
+        if (creds) {
+          db.transaction(() => {
+            db.prepare("DELETE FROM mp_credentials WHERE mp_user_id = ?").run(mpUserId);
+            db.prepare("UPDATE users SET mp_checkout_enabled = 0 WHERE id = ?").run(creds.user_id);
+          })();
+          console.log(`[MP Connect Webhook] Acceso revocado: mp_user_id=${mpUserId}, user_id=${creds.user_id}`);
+        } else {
+          console.log(`[MP Connect Webhook] Notificación de revocación para mp_user_id=${mpUserId} no encontrada en BD`);
+        }
+      } catch (error) {
+        console.error('[MP Connect Webhook] Error procesando revocación:', error);
+      }
+    }
+
+    res.sendStatus(200);
+  });
+
   app.post("/api/mp/webhook", webhookLimiter, async (req, res) => {
     // 1. Validar firma (si el secreto está configurado)
     const webhookSecret = process.env.MP_WEBHOOK_SECRET;
