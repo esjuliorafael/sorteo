@@ -1316,7 +1316,7 @@ async function startServer() {
   }, 5 * 60 * 1000); // Every 5 minutes
 
   // Auto-refresh MP tokens expiring in the next 7 days
-  setInterval(async () => {
+  const refreshExpiringMPTokens = async () => {
     const sevenDaysFromNow = new Date();
     sevenDaysFromNow.setDate(sevenDaysFromNow.getDate() + 7);
 
@@ -1362,7 +1362,10 @@ async function startServer() {
         console.error(`[MP Auto-Refresh] Error renovando token para user_id=${creds.user_id}:`, error);
       }
     }
-  }, 24 * 60 * 60 * 1000); // Cada 24 horas
+  };
+
+  setInterval(refreshExpiringMPTokens, 24 * 60 * 60 * 1000); // Cada 24 horas
+  refreshExpiringMPTokens(); // Ejecutar al arrancar
 
   // Run cleanup on start
   const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
