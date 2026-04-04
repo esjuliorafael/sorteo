@@ -722,7 +722,7 @@ async function startServer() {
     
     const state = jwt.sign({ userId: req.user.id }, JWT_SECRET, { expiresIn: '10m' });
     const redirectUri = `${APP_URL}/api/mp/callback`;
-    const authUrl = `https://auth.mercadopago.com.mx/authorization?client_id=${MP_CLIENT_ID}&response_type=code&platform_id=mp&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
+    const authUrl = `https://auth.mercadopago.com.mx/authorization?client_id=${MP_CLIENT_ID}&response_type=code&platform_id=mp&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}&scope=offline_access`;
     
     res.json({ url: authUrl });
   });
@@ -782,6 +782,50 @@ async function startServer() {
   app.post("/api/mp/disconnect", authenticateToken, (req: any, res) => {
     db.prepare("DELETE FROM mp_credentials WHERE user_id = ?").run(req.user.id);
     res.json({ success: true });
+  });
+
+  app.post("/api/mp/refresh-token", authenticateToken, async (req: any, res) => {
+    const creds = db.prepare(
+      "SELECT * FROM mp_credentials WHERE user_id = ?"
+    ).get(req.user.id) as any;
+
+    if (!creds) return res.status(404).json({ error: "No hay credenciales de MP conectadas" });
+
+    try {
+      const refreshToken = decrypt(creds.refresh_token_encrypted);
+
+      const response = await fetch("https://api.mercadopago.com/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: MP_CLIENT_ID,
+          client_secret: MP_CLIENT_SECRET,
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.error) throw new Error(data.message || data.error);
+
+      const newAccessTokenEnc = encrypt(data.access_token);
+      const newRefreshTokenEnc = encrypt(data.refresh_token);
+      const expiresAt = new Date();
+      expiresAt.setSeconds(expiresAt.getSeconds() + data.expires_in);
+
+      db.prepare(`
+        UPDATE mp_credentials
+        SET access_token_encrypted = ?,
+            refresh_token_encrypted = ?,
+            expires_at = ?
+        WHERE user_id = ?
+      `).run(newAccessTokenEnc, newRefreshTokenEnc, expiresAt.toISOString(), req.user.id);
+
+      res.json({ success: true, expires_at: expiresAt.toISOString() });
+    } catch (error: any) {
+      console.error("[MP Refresh Token] Error:", error);
+      res.status(500).json({ error: "Error al renovar el token de Mercado Pago" });
+    }
   });
 
   // Promo Code Routes
@@ -1270,6 +1314,55 @@ async function startServer() {
     const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     db.prepare("UPDATE tickets SET status = 'available', participant_name = NULL, participant_whatsapp = NULL, locked_at = NULL WHERE status = 'processing' AND locked_at < ?").run(fifteenMinsAgo);
   }, 5 * 60 * 1000); // Every 5 minutes
+
+  // Auto-refresh MP tokens expiring in the next 7 days
+  setInterval(async () => {
+    const sevenDaysFromNow = new Date();
+    sevenDaysFromNow.setDate(sevenDaysFromNow.getDate() + 7);
+
+    const expiringCreds = db.prepare(`
+      SELECT * FROM mp_credentials
+      WHERE expires_at IS NOT NULL
+      AND expires_at <= ?
+    `).all(sevenDaysFromNow.toISOString()) as any[];
+
+    for (const creds of expiringCreds) {
+      try {
+        const refreshToken = decrypt(creds.refresh_token_encrypted);
+
+        const response = await fetch("https://api.mercadopago.com/oauth/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client_id: MP_CLIENT_ID,
+            client_secret: MP_CLIENT_SECRET,
+            grant_type: "refresh_token",
+            refresh_token: refreshToken,
+          }),
+        });
+
+        const data = await response.json();
+        if (data.error) throw new Error(data.message || data.error);
+
+        const newAccessTokenEnc = encrypt(data.access_token);
+        const newRefreshTokenEnc = encrypt(data.refresh_token);
+        const expiresAt = new Date();
+        expiresAt.setSeconds(expiresAt.getSeconds() + data.expires_in);
+
+        db.prepare(`
+          UPDATE mp_credentials
+          SET access_token_encrypted = ?,
+              refresh_token_encrypted = ?,
+              expires_at = ?
+          WHERE user_id = ?
+        `).run(newAccessTokenEnc, newRefreshTokenEnc, expiresAt.toISOString(), creds.user_id);
+
+        console.log(`[MP Auto-Refresh] Token renovado para user_id=${creds.user_id}, nuevo expires_at=${expiresAt.toISOString()}`);
+      } catch (error) {
+        console.error(`[MP Auto-Refresh] Error renovando token para user_id=${creds.user_id}:`, error);
+      }
+    }
+  }, 24 * 60 * 60 * 1000); // Cada 24 horas
 
   // Run cleanup on start
   const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
