@@ -746,20 +746,23 @@ async function startServer() {
     if (!code || !state) return res.status(400).send("Faltan parámetros");
 
     try {
-      // Retrieve PKCE verifier
-      const pkce = db.prepare("SELECT code_verifier FROM mp_pkce_verifiers WHERE state = ?").get(state as string) as any;
+      // 1. Recuperar verifier (sin borrar aún)
+      const pkce = db.prepare(
+        "SELECT code_verifier FROM mp_pkce_verifiers WHERE state = ?"
+      ).get(state as string) as any;
+
       if (!pkce) {
         console.warn("[MP Callback] PKCE verifier not found for state:", state);
         return res.redirect("/settings?mp=error");
       }
-      const codeVerifier = pkce.code_verifier;
-      
-      // Delete verifier (one-time use)
-      db.prepare("DELETE FROM mp_pkce_verifiers WHERE state = ?").run(state as string);
 
+      const codeVerifier = pkce.code_verifier;
+
+      // 2. Validar JWT del state antes de cualquier operación destructiva
       const decoded = jwt.verify(state as string, JWT_SECRET) as any;
       const userId = decoded.userId;
 
+      // 3. Intentar el token exchange con Mercado Pago
       const redirectUri = `${APP_URL}/api/mp/callback`;
       const response = await fetch("https://api.mercadopago.com/oauth/token", {
         method: "POST",
@@ -771,13 +774,17 @@ async function startServer() {
           grant_type: "authorization_code",
           redirect_uri: redirectUri,
           code_verifier: codeVerifier,
-          test_token: false
+          test_token: false,
         }),
       });
 
       const data = await response.json();
       if (data.error) throw new Error(data.message || data.error);
 
+      // 4. Todo salió bien: ahora sí eliminar el verifier (uso único)
+      db.prepare("DELETE FROM mp_pkce_verifiers WHERE state = ?").run(state as string);
+
+      // 5. Guardar credenciales en BD
       const accessTokenEnc = encrypt(data.access_token);
       const refreshTokenEnc = encrypt(data.refresh_token);
       const expiresAt = new Date();
