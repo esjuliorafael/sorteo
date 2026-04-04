@@ -154,6 +154,12 @@ db.exec(`
     status TEXT NOT NULL,       -- 'approved' | 'rejected' | 'cancelled'
     processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS mp_pkce_verifiers (
+    state TEXT PRIMARY KEY,
+    code_verifier TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // BUG FIX 2: Ensure payment_type_id exists
@@ -721,8 +727,16 @@ async function startServer() {
     if (!MP_CLIENT_ID) return res.status(500).json({ error: "Mercado Pago no está configurado" });
     
     const state = jwt.sign({ userId: req.user.id }, JWT_SECRET, { expiresIn: '10m' });
+    
+    // PKCE generation
+    const codeVerifier = crypto.randomBytes(32).toString('base64url');
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    
+    // Store verifier
+    db.prepare("INSERT INTO mp_pkce_verifiers (state, code_verifier) VALUES (?, ?)").run(state, codeVerifier);
+    
     const redirectUri = `${APP_URL}/api/mp/callback`;
-    const authUrl = `https://auth.mercadopago.com.mx/authorization?client_id=${MP_CLIENT_ID}&response_type=code&platform_id=mp&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}&scope=offline_access`;
+    const authUrl = `https://auth.mercadopago.com.mx/authorization?client_id=${MP_CLIENT_ID}&response_type=code&platform_id=mp&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}&scope=offline_access&code_challenge=${codeChallenge}&code_challenge_method=S256`;
     
     res.json({ url: authUrl });
   });
@@ -732,6 +746,17 @@ async function startServer() {
     if (!code || !state) return res.status(400).send("Faltan parámetros");
 
     try {
+      // Retrieve PKCE verifier
+      const pkce = db.prepare("SELECT code_verifier FROM mp_pkce_verifiers WHERE state = ?").get(state as string) as any;
+      if (!pkce) {
+        console.warn("[MP Callback] PKCE verifier not found for state:", state);
+        return res.redirect("/settings?mp=error");
+      }
+      const codeVerifier = pkce.code_verifier;
+      
+      // Delete verifier (one-time use)
+      db.prepare("DELETE FROM mp_pkce_verifiers WHERE state = ?").run(state as string);
+
       const decoded = jwt.verify(state as string, JWT_SECRET) as any;
       const userId = decoded.userId;
 
@@ -745,6 +770,8 @@ async function startServer() {
           code,
           grant_type: "authorization_code",
           redirect_uri: redirectUri,
+          code_verifier: codeVerifier,
+          test_token: false
         }),
       });
 
@@ -1370,6 +1397,7 @@ async function startServer() {
   // Run cleanup on start
   const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   db.prepare("UPDATE tickets SET status = 'available', participant_name = NULL, participant_whatsapp = NULL, locked_at = NULL WHERE status = 'processing' AND locked_at < ?").run(fifteenMinsAgo);
+  db.prepare("DELETE FROM mp_pkce_verifiers WHERE created_at < ?").run(fifteenMinsAgo);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
